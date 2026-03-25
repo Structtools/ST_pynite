@@ -1,0 +1,55 @@
+[project]
+name = "PyNiteFEA"
+version = "2.4.1"
+description = "A simple elastic 3D structural finite element library for Python."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "D. Craig Brinck, PE, SE", email = "Building.Code@outlook.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.4.0",
+    "prettytable",
+    "scipy",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+all = [
+    "ipython",
+    "vtk>=9.3.0",
+    "pyvista[all]>=0.43.4",
+    "trame_jupyter_extension",
+    "ipywidgets",
+    "pdfkit",
+    "jinja2",
+]
+vtk = ["ipython", "vtk>=9.3.0"]
+pyvista = ["pyvista[all]>=0.43.4", "trame_jupyter_extension", "ipywidgets"]
+reporting = ["pdfkit", "jinja2"]
+derivations = ["jupyterlab", "sympy"]
+
+[project.urls]
+Repository = "https://github.com/JWock82/Pynite.git"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["Pynite", "Pynite.*"]
+
+[tool.setuptools.package-data]
+Pynite = ["*.html", "*.css", "*.png"]
+
+[dependency-groups]
+dev = ["pytest"]

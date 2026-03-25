@@ -1,6 +1,11 @@
 from __future__ import annotations  # Allows more recent type hints features
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from math import isclose
+
+import numpy as np
+import scipy as sp
+from scipy.sparse.linalg import eigsh, spsolve
 
 from numpy import array, atleast_2d, zeros, subtract, matmul, divide, seterr, nanmax
 from numpy.linalg import solve
@@ -13,6 +18,226 @@ if TYPE_CHECKING:
     from numpy import float64
     from numpy.typing import NDArray
     from scipy.sparse import lil_matrix
+
+
+@dataclass
+class BucklingResults:
+    """Results from a linear buckling (stability) eigenvalue analysis.
+
+    Attributes
+    ----------
+    load_multipliers : np.ndarray
+        Load multipliers λ sorted ascending. The smallest positive λ is the
+        critical load factor: P_cr = λ · P_applied.
+    mode_shapes : np.ndarray
+        Buckling mode shape vectors (columns) in the free-DOF basis.
+    combo_name : str
+        Name of the load combination used for the static pre-solve.
+    """
+
+    load_multipliers: np.ndarray
+    mode_shapes: np.ndarray
+    combo_name: str
+    _model: object   # FEModel3D reference — used by effective_length()
+    _D1_indices: list
+    _D2_indices: list
+
+    @property
+    def critical_load_factors(self) -> np.ndarray:
+        """Alias for load_multipliers (EN 1993 terminology)."""
+        return self.load_multipliers
+
+    def effective_length(self, member, mode: int = 0, plane: str = 'y') -> float:
+        """Compute the effective buckling length L_cr for a member.
+
+        Uses the Euler formula: L_cr = π · sqrt(EI / N_cr)
+        where N_cr = λ · |N_Ed| and N_Ed is the member axial force from the
+        static pre-solve.
+
+        Parameters
+        ----------
+        member : str or PhysMember
+            Member name or object.
+        mode : int
+            Buckling mode index (0 = lowest/critical). Default 0.
+        plane : str
+            ``'y'`` for bending about local y-axis (uses Iy),
+            ``'z'`` for bending about local z-axis (uses Iz). Default ``'y'``.
+
+        Returns
+        -------
+        float
+            L_cr in the same length units as the model geometry.
+            Returns ``inf`` if the member has no axial force.
+        """
+        if isinstance(member, str):
+            member = self._model.members[member]
+
+        lam = self.load_multipliers[mode]
+
+        # Axial force at the i-end from the static pre-solve (positive = compression)
+        N_Ed = member.axial(x=0.0, combo_name=self.combo_name)
+        if abs(N_Ed) < 1e-12:
+            return float('inf')
+
+        N_cr = lam * abs(N_Ed)
+
+        # Section properties from the first sub-member
+        sub = next(iter(member.sub_members.values()))
+        E = sub.material.E
+        I = sub.section.Iy if plane.lower() == 'y' else sub.section.Iz
+
+        return np.pi * np.sqrt(E * I / N_cr)
+
+
+def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
+                      num_modes: int = 5) -> BucklingResults:
+    """Perform linear buckling (stability) eigenvalue analysis.
+
+    Solves the generalised eigenvalue problem::
+
+        K · φ = λ · (−Kg) · φ
+
+    where
+
+    * K   = global elastic stiffness matrix (free DOFs only)
+    * Kg  = global geometric stiffness matrix assembled using the member axial
+            forces from a first-order static solve under *combo_name*
+    * λ   = eigenvalues → load multipliers to the critical buckling load
+    * φ   = eigenvectors → buckling mode shapes
+
+    The smallest positive λ gives the critical load factor:
+    ``P_cr = λ_min · P_applied``.
+
+    Steps
+    -----
+    1. Prepare the model (reset displacements, renumber nodes/elements).
+    2. Partition DOFs into free (D1) and restrained (D2).
+    3. Run a first-order static solve for *combo_name* to populate member
+       axial forces (required for Kg assembly).
+    4. Assemble K and Kg; partition both to free DOFs.
+    5. Solve ``eigsh(K11, M=−Kg11, sigma=0, which='LM', k=num_modes)``.
+    6. Filter positive eigenvalues and sort ascending.
+
+    Parameters
+    ----------
+    model : FEModel3D
+    combo_name : str
+        Load combination to use for the static pre-solve. Defaults to
+        ``'Combo 1'``.
+    num_modes : int
+        Number of buckling modes to compute. Defaults to 5.
+
+    Returns
+    -------
+    BucklingResults
+
+    Raises
+    ------
+    ValueError
+        If all DOFs are restrained, or if Kg is identically zero (no axial
+        loads).
+    RuntimeError
+        If the static pre-solve or the eigenvalue solve fails.
+    """
+    # ------------------------------------------------------------------ #
+    # Step 1: Prepare model                                                #
+    # ------------------------------------------------------------------ #
+    _prepare_model(model)
+
+    # ------------------------------------------------------------------ #
+    # Step 2: DOF partitioning                                             #
+    # ------------------------------------------------------------------ #
+    D1_indices, D2_indices, D2 = _partition_D(model)
+
+    # ------------------------------------------------------------------ #
+    # Step 3: First-order static solve for combo_name                     #
+    #         Populates node displacements so that Kg(first_step=False)   #
+    #         can back-calculate member axial forces via axial strain.     #
+    # ------------------------------------------------------------------ #
+    K_global = model.K(combo_name, sparse=True).tocsr()
+    K11, K12, K21, K22 = _partition(model, K_global, D1_indices, D2_indices)
+
+    if K11.shape == (0, 0):
+        raise ValueError(
+            'All DOFs are restrained — buckling analysis requires at least '
+            'one free DOF.'
+        )
+
+    FER1, FER2 = _partition(model, model.FER(combo_name), D1_indices, D2_indices)
+    P1,   P2   = _partition(model, model.P(combo_name),   D1_indices, D2_indices)
+
+    try:
+        D1 = spsolve(K11, P1 - FER1 - K12 @ D2).reshape(-1, 1)
+    except Exception as exc:
+        raise RuntimeError(f'Static pre-solve failed: {exc}') from exc
+
+    combo = model.load_combos[combo_name]
+    _store_displacements(model, D1, D2, D1_indices, D2_indices, combo)
+
+    # ------------------------------------------------------------------ #
+    # Step 4: Geometric stiffness using axial forces from the static solve #
+    # ------------------------------------------------------------------ #
+    Kg_global = model.Kg(combo_name, first_step=False, sparse=True).tocsr()
+    Kg11, Kg12, Kg21, Kg22 = _partition(model, Kg_global, D1_indices, D2_indices)
+
+    # ------------------------------------------------------------------ #
+    # Step 5: Eigenvalue solve                                             #
+    #                                                                      #
+    # For compression-dominant structures, Kg11 is negative semi-definite, #
+    # so B = −Kg11 is positive semi-definite — exactly the right form for  #
+    # scipy's eigsh (which requires a positive semi-definite B).           #
+    #                                                                      #
+    # Small diagonal regularisation (eps) handles members with zero axial  #
+    # force, which would otherwise make B singular.                        #
+    # ------------------------------------------------------------------ #
+    neg_Kg11 = (-Kg11).tocsr()
+
+    if neg_Kg11.nnz == 0:
+        raise ValueError(
+            'The geometric stiffness matrix is zero — no member has a '
+            'non-zero axial force under combo_name. '
+            'Ensure compressive loads are applied before calling '
+            'buckling_analysis().'
+        )
+
+    eps = float(np.abs(K11.diagonal()).mean()) * 1e-8
+    B = neg_Kg11 + sp.sparse.eye(K11.shape[0], format='csr') * eps
+
+    # eigsh requires k < N (matrix dimension)
+    k = min(num_modes, K11.shape[0] - 1)
+
+    try:
+        eigenvalues, eigenvectors = eigsh(
+            K11, k=k, M=B, sigma=0.0, which='LM'
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f'Eigenvalue solve failed: {exc}. '
+            'Check that the structure has members under compression.'
+        ) from exc
+
+    # ------------------------------------------------------------------ #
+    # Step 6: Filter positive eigenvalues and sort ascending               #
+    # ------------------------------------------------------------------ #
+    pos_mask     = eigenvalues > 0
+    eigenvalues  = eigenvalues[pos_mask]
+    eigenvectors = eigenvectors[:, pos_mask]
+
+    order        = np.argsort(eigenvalues)
+    eigenvalues  = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+
+    model.solution = 'Buckling'
+
+    return BucklingResults(
+        load_multipliers=eigenvalues,
+        mode_shapes=eigenvectors,
+        combo_name=combo_name,
+        _model=model,
+        _D1_indices=D1_indices,
+        _D2_indices=D2_indices,
+    )
 
 
 def _prepare_model(model: FEModel3D, n_modes: int = 0) -> None:

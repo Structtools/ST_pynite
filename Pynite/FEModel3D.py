@@ -2638,6 +2638,47 @@ class FEModel3D():
                 print(f'  Mode {i + 1}: {freq:.3f} Hz')
             print('- Modal analysis complete')
 
+    def analyze_buckling(self, combo_name: str = 'Combo 1', num_modes: int = 5,
+                         log: bool = False):
+        """Performs linear buckling (stability) eigenvalue analysis.
+
+        Solves [K − λ·Kg]·φ = 0 using the axial forces from a first-order
+        static solve under *combo_name*.  The smallest positive eigenvalue λ
+        is the critical load factor: ``P_cr = λ · P_applied``.
+
+        Effective buckling lengths can be obtained from the returned
+        :class:`BucklingResults` object::
+
+            results = model.analyze_buckling()
+            L_cr = results.effective_length('Column1', mode=0, plane='y')
+
+        :param combo_name: Load combination used for the static pre-solve.
+            Defaults to ``'Combo 1'``.
+        :type combo_name: str, optional
+        :param num_modes: Number of buckling modes to compute. Defaults to 5.
+        :type num_modes: int, optional
+        :param log: Prints progress to the console when ``True``. Defaults to
+            ``False``.
+        :type log: bool, optional
+        :return: Buckling results containing load multipliers and mode shapes.
+        :rtype: BucklingResults
+        """
+        from .Analysis import buckling_analysis
+
+        if log:
+            print('+----------------------+')
+            print('| Analyzing: Buckling  |')
+            print('+----------------------+')
+
+        self._buckling_results = buckling_analysis(self, combo_name, num_modes)
+
+        if log:
+            for i, lam in enumerate(self._buckling_results.load_multipliers):
+                print(f'  Mode {i + 1}: λ = {lam:.4f}')
+            print('- Buckling analysis complete')
+
+        return self._buckling_results
+
     def _not_ready_yet_analyze_pushover(self, log=False, check_stability=True, push_combo='Push', max_iter=30, tol=0.01, sparse=True, combo_tags=None):
 
         if log:
