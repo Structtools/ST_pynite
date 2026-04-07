@@ -286,15 +286,19 @@ def _add_column(
 
 
 def _add_beam(
-    model, name, left_node, right_node, mat, sec, n_elem, y_level, x_left, x_right
+    model, name, node_i, node_j, mat, sec, n_elem, xi, yi, xj, yj
 ):
-    """Add a horizontal beam with n_elem intermediate nodes."""
-    span = x_right - x_left
-    dx = span / n_elem
+    """Add a beam with n_elem intermediate nodes.
+
+    Intermediate nodes are placed by linear interpolation between
+    (xi, yi, 0) and (xj, yj, 0).  Works for both horizontal and
+    inclined members.
+    """
     for i in range(1, n_elem):
+        t = i / n_elem
         nn = f"_{name}_int{i}"
-        model.add_node(nn, x_left + i * dx, y_level, 0.0)
-    model.add_member(name, left_node, right_node, mat, sec)
+        model.add_node(nn, xi + t * (xj - xi), yi + t * (yj - yi), 0.0)
+    model.add_member(name, node_i, node_j, mat, sec)
 
 
 def build_model():
@@ -339,9 +343,9 @@ def build_model():
         )
 
     # Beams
-    _add_beam(model, "Beam1", "B", "C", "Steel", BEAM_SEC, N_ELEM, H, 0.0, B1)
+    _add_beam(model, "Beam1", "B", "C", "Steel", BEAM_SEC, N_ELEM, 0.0, H, B1, H)
     if two_bay:
-        _add_beam(model, "Beam2", "C", "D", "Steel", BEAM_SEC, N_ELEM, H, B1, B1 + B2)
+        _add_beam(model, "Beam2", "C", "D", "Steel", BEAM_SEC, N_ELEM, B1, H, B1 + B2, H)
 
     # --- Distributed beam loads ----------------------------------------------
     if BEAM_LOAD_1 != 0.0:
