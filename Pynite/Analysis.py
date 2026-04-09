@@ -6,6 +6,7 @@ from math import isclose
 import numpy as np
 import scipy as sp
 from scipy.sparse.linalg import eigsh, spsolve
+from scipy.sparse.linalg import ArpackNoConvergence
 
 from numpy import array, atleast_2d, zeros, subtract, matmul, divide, seterr, nanmax
 from numpy.linalg import solve
@@ -205,12 +206,26 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     B = neg_Kg11 + sp.sparse.eye(K11.shape[0], format='csr') * eps
 
     # eigsh requires k < N (matrix dimension)
-    k = min(num_modes, K11.shape[0] - 1)
+    # Request extra modes to improve convergence; trim to num_modes later
+    k = min(max(num_modes, 2 * num_modes), K11.shape[0] - 1)
 
     try:
+        # Use a deterministic starting vector to ensure reproducible results
+        rng = np.random.RandomState(42)
+        v0 = rng.rand(K11.shape[0])
         eigenvalues, eigenvectors = eigsh(
-            K11, k=k, M=B, sigma=0.0, which='LM'
+            K11, k=k, M=B, sigma=0.0, which='LM', v0=v0,
+            maxiter=k * 40,
         )
+    except ArpackNoConvergence as exc:
+        # Use the converged eigenvalues/vectors even if not all converged
+        eigenvalues = exc.eigenvalues
+        eigenvectors = exc.eigenvectors
+        if len(eigenvalues) == 0:
+            raise RuntimeError(
+                'Eigenvalue solve failed: no eigenvalues converged. '
+                'Check that the structure has members under compression.'
+            ) from exc
     except Exception as exc:
         raise RuntimeError(
             f'Eigenvalue solve failed: {exc}. '
@@ -225,8 +240,8 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     eigenvectors = eigenvectors[:, pos_mask]
 
     order        = np.argsort(eigenvalues)
-    eigenvalues  = eigenvalues[order]
-    eigenvectors = eigenvectors[:, order]
+    eigenvalues  = eigenvalues[order][:num_modes]
+    eigenvectors = eigenvectors[:, order][:, :num_modes]
 
     model.solution = 'Buckling'
 

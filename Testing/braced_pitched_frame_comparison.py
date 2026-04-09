@@ -1,39 +1,35 @@
-"""
-pitched_frame_comparison.py
-===========================
-Interactive boilerplate for comparing PyNite buckling results against
-PolyFrame, FEM Design, or any other reference.
-
-Set SCENARIO (see list below) and run — or set SCENARIO = 0 and edit the
-PARAMETERS block manually.
+r"""
+braced_pitched_frame_comparison.py
+==================================
+Pitched-roof portal frame with a diagonal brace member (A -> C).
+Otherwise identical to pitched_frame_comparison.py for direct comparison.
 
 Usage
 -----
-    uv run python Testing/pitched_frame_comparison.py
+    uv run python Testing/braced_pitched_frame_comparison.py
 
 Structure topology
 ------------------
-Single-bay pitched-roof (gable) portal frame in the global XY-plane (Z=0).
-Columns are vertical (along Y).  Rafters are inclined from eave to ridge.
-Column bases can be pinned or fixed.  Eave connections are rigid.
+Single-bay pitched-roof portal frame with diagonal brace in the XY-plane (Z=0).
 
               R (ridge)
-             / \\
-            /   \\
-     Raft1 /     \\ Raft2
-          /       \\
+             / \
+            /   \
+     Raft1 /     \ Raft2
+          /       \
          B ─ ─ ─ ─ C        (eave level, Y = H)
-         |         |
-   Col1  |         |  Col2
-         |         |
+         |       / |
+   Col1  |     /   |  Col2
+         |   / Brc |
+         | /       |
          A         D
        (base)    (base)
 
-    B_SPAN = 5.0 m  (horizontal distance A to D)
-    H      = 3.0 m  (column height, A to B / D to C)
-    RIDGE_H = 1.0 m (ridge rise above eave level)
+    B_SPAN  = 5.0 m  (horizontal distance A to D)
+    H       = 3.0 m  (column height, A to B / D to C)
+    RIDGE_H = 1.0 m  (ridge rise above eave level)
 
-    Ridge node R is at (B_SPAN/2, H + RIDGE_H, 0).
+    Brace "Brc" runs from A (0, 0, 0) to C (B_SPAN, H, 0).
 """
 
 import sys
@@ -85,6 +81,7 @@ SECTIONS = {
 # Which section for each member type
 COLUMN_SEC = "IPE200"
 RAFTER_SEC = "IPE200"
+BRACE_SEC = "IPE200"
 
 # --- Boundary conditions ----------------------------------------------------
 # True = restrained, False = free.  Order: (DX, DY, DZ, RX, RY, RZ)
@@ -118,10 +115,9 @@ LOAD_R_FX = 0.0   # node R
 COL_LOAD_1_FX = 0.0   # Col1 (A->B)
 COL_LOAD_2_FX = 0.0   # Col2 (D->C)
 
-# --- Lateral bracing / 2D constraint ----------------------------------------
-# True  = restrain out-of-plane DOFs (DZ, RX, RY) at all nodes
-#         forces pure in-plane buckling — use for braced frames
-# False = full 3D analysis including lateral-torsional buckling
+# --- Lateral bracing at eave/ridge nodes ------------------------------------
+# True  = restrain DZ at nodes B, C, R
+# False = no lateral restraint -- full 3D eigenvalue
 LATERAL_BRACE_NODES = True
 
 # --- Buckling analysis settings --------------------------------------------
@@ -139,12 +135,13 @@ COMBO_NAME = "Combo 1"
 
 _PRESETS = {
     1: dict(
-        name="Pitched frame, fixed bases, 10 kN/m UDL on rafters (gravity)",
+        name="Braced pitched frame, fixed bases, 10 kN/m UDL on rafters (gravity)",
         H=3.0,
         B_SPAN=5.0,
         RIDGE_H=1.0,
         COLUMN_SEC="IPE200",
         RAFTER_SEC="IPE200",
+        BRACE_SEC="IPE200",
         _base="FIXED",
         RAFTER_LOAD_1=-10e3,
         RAFTER_LOAD_2=-10e3,
@@ -163,12 +160,13 @@ _PRESETS = {
         NUM_MODES=5,
     ),
     2: dict(
-        name="Pitched frame, fixed bases, midspan point loads on rafters (global FY)",
+        name="Braced pitched frame, fixed bases, midspan point loads on rafters (global FY)",
         H=3.0,
         B_SPAN=5.0,
         RIDGE_H=1.0,
         COLUMN_SEC="IPE200",
         RAFTER_SEC="IPE200",
+        BRACE_SEC="IPE200",
         _base="FIXED",
         RAFTER_LOAD_1=0.0,
         RAFTER_LOAD_2=0.0,
@@ -187,12 +185,13 @@ _PRESETS = {
         NUM_MODES=5,
     ),
     3: dict(
-        name="Pitched frame, fixed bases, FX point loads at eave nodes",
+        name="Braced pitched frame, fixed bases, FX point loads at eave nodes",
         H=3.0,
         B_SPAN=5.0,
         RIDGE_H=1.0,
         COLUMN_SEC="IPE200",
         RAFTER_SEC="IPE200",
+        BRACE_SEC="IPE200",
         _base="FIXED",
         RAFTER_LOAD_1=0.0,
         RAFTER_LOAD_2=0.0,
@@ -211,12 +210,13 @@ _PRESETS = {
         NUM_MODES=5,
     ),
     4: dict(
-        name="Pitched frame, wind-like: column FX UDL + asymmetric rafter FY UDLs",
+        name="Braced pitched frame, wind-like: column FX UDL + asymmetric rafter FY UDLs",
         H=3.0,
         B_SPAN=5.0,
         RIDGE_H=1.0,
         COLUMN_SEC="IPE200",
         RAFTER_SEC="IPE200",
+        BRACE_SEC="IPE200",
         _base="FIXED",
         RAFTER_LOAD_1=-10e3,
         RAFTER_LOAD_2=+10e3,
@@ -274,7 +274,8 @@ def _add_column(
 
 
 def _add_beam(
-    model, name, node_i, node_j, mat, sec, n_elem, xi, yi, xj, yj
+    model, name, node_i, node_j, mat, sec, n_elem, xi, yi, xj, yj,
+    tension_only=False,
 ):
     """Add a beam with n_elem intermediate nodes.
 
@@ -286,7 +287,7 @@ def _add_beam(
         t = i / n_elem
         nn = f"_{name}_int{i}"
         model.add_node(nn, xi + t * (xj - xi), yi + t * (yj - yi), 0.0)
-    model.add_member(name, node_i, node_j, mat, sec)
+    model.add_member(name, node_i, node_j, mat, sec, tension_only=tension_only)
 
 
 def build_model():
@@ -327,6 +328,13 @@ def build_model():
     _add_beam(
         model, "Raft2", "R", "C", "Steel", RAFTER_SEC, N_ELEM,
         rx, ry, B_SPAN, H,
+    )
+
+    # Diagonal brace (A -> C) -- tension only
+    _add_beam(
+        model, "Brc", "A", "C", "Steel", BRACE_SEC, N_ELEM,
+        0.0, 0.0, B_SPAN, H,
+        tension_only=True,
     )
 
     # --- Distributed rafter loads (global FY) --------------------------------
@@ -390,10 +398,15 @@ def _rafter_length():
     return np.sqrt(rx**2 + RIDGE_H**2)
 
 
+def _brace_length():
+    """Compute the geometric length of the diagonal brace (A -> C)."""
+    return np.sqrt(B_SPAN**2 + H**2)
+
+
 def _print_section_info():
-    for role, sec_name in (("Column", COLUMN_SEC), ("Rafter", RAFTER_SEC)):
+    for role, sec_name in (("Column", COLUMN_SEC), ("Rafter", RAFTER_SEC), ("Brace", BRACE_SEC)):
         s = SECTIONS[sec_name]
-        print(f"  {role} section : {sec_name}")
+        print(f"  {role} section  : {sec_name}")
         print(f"    A  = {s['A'] * 1e4:.2f} cm^2")
         print(f"    Iy = {s['Iy'] * 1e8:.0f} cm^4  (strong axis)")
         print(f"    Iz = {s['Iz'] * 1e8:.0f} cm^4  (weak axis)")
@@ -457,10 +470,12 @@ def main():
     _apply_scenario()
 
     L_raft = _rafter_length()
+    L_brace = _brace_length()
     slope_deg = np.degrees(np.arctan2(RIDGE_H, B_SPAN / 2.0))
+    brace_deg = np.degrees(np.arctan2(H, B_SPAN))
 
     print("=" * 64)
-    print("  PyNite -- Pitched-Roof Portal Frame Buckling Analysis")
+    print("  PyNite -- Braced Pitched-Roof Portal Frame Buckling Analysis")
     print("=" * 64)
     print()
     if SCENARIO != 0:
@@ -469,6 +484,7 @@ def main():
     print(f"  Frame geometry : H={H:.2f} m, B_SPAN={B_SPAN:.2f} m, RIDGE_H={RIDGE_H:.2f} m")
     print(f"  Ridge at       : ({B_SPAN / 2:.2f}, {H + RIDGE_H:.2f}, 0)")
     print(f"  Rafter length  : {L_raft:.3f} m   slope = {slope_deg:.1f} deg")
+    print(f"  Brace  (A->C)  : {L_brace:.3f} m   angle = {brace_deg:.1f} deg")
     bc_label = "Fixed" if BASE_SUPPORT == FIXED_BASE else "Pinned"
     print(f"  Base condition : {bc_label}")
     print(f"  Sub-elements   : {N_ELEM} per member")
@@ -498,12 +514,13 @@ def main():
     print()
 
     # --- Effective lengths per member and mode --------------------------------
-    all_members = ["Col1", "Col2", "Raft1", "Raft2"]
+    all_members = ["Col1", "Col2", "Raft1", "Raft2", "Brc"]
     ref_lengths = {
         "Col1": H,
         "Col2": H,
         "Raft1": L_raft,
         "Raft2": L_raft,
+        "Brc": L_brace,
     }
 
     sec_col = SECTIONS[COLUMN_SEC]
@@ -512,7 +529,8 @@ def main():
 
     print(SEP)
     print(
-        f"  Effective buckling lengths  (H = {H:.2f} m, L_raft = {L_raft:.3f} m)"
+        f"  Effective buckling lengths  "
+        f"(H = {H:.2f} m, L_raft = {L_raft:.3f} m, L_brace = {L_brace:.3f} m)"
     )
     print(SEP)
     print(
@@ -567,6 +585,14 @@ def main():
     print(f"  Rafter  (L=L_raft={L_raft:.3f} m):")
     print(f"    Strong axis (Iy):  N_cr = {N_Ey_r:.1f} kN   L_eff/L = 1.00")
     print(f"    Weak axis  (Iz):  N_cr = {N_Ez_r:.1f} kN   L_eff/L = 1.00")
+    sec_brc = SECTIONS[BRACE_SEC]
+    EIy_brc = E * sec_brc["Iy"]
+    EIz_brc = E * sec_brc["Iz"]
+    N_Ey_b = np.pi**2 * EIy_brc / L_brace**2 / 1e3
+    N_Ez_b = np.pi**2 * EIz_brc / L_brace**2 / 1e3
+    print(f"  Brace   (L=L_brace={L_brace:.3f} m):")
+    print(f"    Strong axis (Iy):  N_cr = {N_Ey_b:.1f} kN   L_eff/L = 1.00")
+    print(f"    Weak axis  (Iz):  N_cr = {N_Ez_b:.1f} kN   L_eff/L = 1.00")
     print()
 
     # --- Column axial forces -------------------------------------------------
@@ -587,23 +613,23 @@ def main():
     print(SEP)
     print()
 
-    # --- Rafter internal forces ----------------------------------------------
-    rafter_names = ["Raft1", "Raft2"]
+    # --- Rafter & brace internal forces --------------------------------------
+    member_names = ["Raft1", "Raft2", "Brc"]
     print(SEP)
-    print("  Rafter internal forces  (compare with PolyFrame / FEM Design)")
+    print("  Rafter & brace internal forces  (compare with PolyFrame / FEM Design)")
     print(SEP)
     print(f"  {'Member':8s}  {'N_Ed [kN]':>12}  {'M_max [kNm]':>12}  {'Sign_N'}")
     print(SEP)
-    for rname in rafter_names:
-        rm = model.members[rname]
+    for mname in member_names:
+        m = model.members[mname]
         try:
-            N = rm.axial(x=0.0, combo_name=COMBO_NAME)
+            N = m.axial(x=0.0, combo_name=COMBO_NAME)
             sign = "compr." if N > 0 else "tension"
-            x_pts = [i * rm.L() / 20 for i in range(21)]
-            M_max = max(abs(rm.moment("Mz", x, combo_name=COMBO_NAME)) for x in x_pts)
-            print(f"  {rname:8s}  {N / 1e3:12.2f}  {M_max / 1e3:12.2f}  {sign}")
+            x_pts = [i * m.L() / 20 for i in range(21)]
+            M_max = max(abs(m.moment("Mz", x, combo_name=COMBO_NAME)) for x in x_pts)
+            print(f"  {mname:8s}  {N / 1e3:12.2f}  {M_max / 1e3:12.2f}  {sign}")
         except Exception as exc:
-            print(f"  {rname:8s}  {'N/A':>12}  {'N/A':>12}  ({exc})")
+            print(f"  {mname:8s}  {'N/A':>12}  {'N/A':>12}  ({exc})")
     print(SEP)
     print()
     print("  Done.  Compare Lambda_cr and L_cr/L with PolyFrame / FEM Design output.")
