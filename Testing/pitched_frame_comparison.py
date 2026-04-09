@@ -53,8 +53,9 @@ from Pynite import FEModel3D
 #  2  Midspan P      fixed bases, midspan point loads on rafters (global FY)
 #  3  Eave FX loads  fixed bases, FX point loads at eave nodes B & C
 #  4  Wind-like      fixed bases, column FX UDL + asymmetric rafter FY UDLs
+#  5  Asym rafter    fixed bases, asymmetric rafter FY UDLs (no horiz. load)
 #
-SCENARIO = int(os.getenv("SCENARIO", "1"))
+SCENARIO = int(os.getenv("SCENARIO", "4"))
 
 # ============================================================================
 # PARAMETERS -- used when SCENARIO = 0, or as defaults overridden by presets
@@ -69,17 +70,19 @@ RIDGE_H = 1.0    # ridge rise above eave level
 N_ELEM = 8
 
 # --- Material: steel (SI units: N, m, Pa) -----------------------------------
-E = 200e9    # Young's modulus
-G = 80e9     # Shear modulus
+E = 210e9    # Young's modulus
+G = 80.769e9     # Shear modulus
 NU = 0.3     # Poisson's ratio
 RHO = 0.0    # density -- set to 7850 if you want self-weight included
 
 # --- Cross-sections ---------------------------------------------------------
-# Keys: (A [m^2], Iy [m^4], Iz [m^4], J [m^4])
+# Keys: (A [m^2], Iy [m^4], Iz [m^4], J [m^4], Asy [m^2], Asz [m^2])
+# Asy = shear area for y-dir shear (bending about z / weak-axis) = flange area
+# Asz = shear area for z-dir shear (bending about y / strong-axis) = web area
 SECTIONS = {
-    "IPE200": dict(A=28.5e-4, Iy=1943e-8, Iz=142e-8, J=7.0e-8),
-    "IPE300": dict(A=53.8e-4, Iy=8356e-8, Iz=604e-8, J=20.1e-8),
-    "HEA200": dict(A=53.8e-4, Iy=3692e-8, Iz=1336e-8, J=21.1e-8),
+    "IPE200": dict(A=28.48e-4, Iy=1943e-8, Iz=142e-8, J=7.0e-8, Asy=17.0e-4, Asz=14.02e-4),
+    "IPE300": dict(A=53.8e-4, Iy=8356e-8, Iz=604e-8, J=20.1e-8, Asy=32.10e-4, Asz=25.67e-4),
+    "HEA200": dict(A=53.8e-4, Iy=3692e-8, Iz=1336e-8, J=21.1e-8, Asy=40.0e-4, Asz=18.05e-4),
 }
 
 # Which section for each member type
@@ -123,6 +126,11 @@ COL_LOAD_2_FX = 0.0   # Col2 (D->C)
 #         forces pure in-plane buckling — use for braced frames
 # False = full 3D analysis including lateral-torsional buckling
 LATERAL_BRACE_NODES = True
+
+# --- Beam element formulation -----------------------------------------------
+# True  = Timoshenko beam (includes shear deformation via Asy/Asz)
+# False = Euler-Bernoulli (classical, no shear deformation)
+USE_TIMOSHENKO = True
 
 # --- Buckling analysis settings --------------------------------------------
 NUM_MODES = 5          # number of buckling modes to compute
@@ -234,6 +242,54 @@ _PRESETS = {
         N_ELEM=8,
         NUM_MODES=5,
     ),
+    5: dict(
+        name="Pitched frame, asymmetric rafter FY UDLs (no horizontal load)",
+        H=3.0,
+        B_SPAN=5.0,
+        RIDGE_H=1.0,
+        COLUMN_SEC="IPE200",
+        RAFTER_SEC="IPE200",
+        _base="FIXED",
+        RAFTER_LOAD_1=-10e3,
+        RAFTER_LOAD_2=+10e3,
+        RAFTER_MID_LOAD_1=0.0,
+        RAFTER_MID_LOAD_2=0.0,
+        LOAD_B=0.0,
+        LOAD_C=0.0,
+        LOAD_R=0.0,
+        LOAD_B_FX=0.0,
+        LOAD_C_FX=0.0,
+        LOAD_R_FX=0.0,
+        COL_LOAD_1_FX=0.0,
+        COL_LOAD_2_FX=0.0,
+        LATERAL_BRACE_NODES=True,
+        N_ELEM=8,
+        NUM_MODES=5,
+    ),
+    6: dict(
+        name="Pitched frame, wind-like: asymmetric rafter FY UDLs",
+        H=3.0,
+        B_SPAN=5.0,
+        RIDGE_H=1.0,
+        COLUMN_SEC="IPE200",
+        RAFTER_SEC="IPE200",
+        _base="FIXED",
+        RAFTER_LOAD_1=0.0,
+        RAFTER_LOAD_2=0.0,
+        RAFTER_MID_LOAD_1=0.0,
+        RAFTER_MID_LOAD_2=0.0,
+        LOAD_B=0.0,
+        LOAD_C=0.0,
+        LOAD_R=0.0,
+        LOAD_B_FX=0.0,
+        LOAD_C_FX=0.0,
+        LOAD_R_FX=0.0,
+        COL_LOAD_1_FX=10e3,
+        COL_LOAD_2_FX=10e3,
+        LATERAL_BRACE_NODES=True,
+        N_ELEM=8,
+        NUM_MODES=5,
+    ),
 }
 
 
@@ -270,7 +326,7 @@ def _add_column(
         nn = f"_{name}_int{i}"
         model.add_node(nn, base_x, i * h, 0.0)
     model.def_support(base_node, *base_support)
-    model.add_member(name, base_node, top_node, mat, sec)
+    model.add_member(name, base_node, top_node, mat, sec, rotation=90)
 
 
 def _add_beam(
@@ -286,7 +342,7 @@ def _add_beam(
         t = i / n_elem
         nn = f"_{name}_int{i}"
         model.add_node(nn, xi + t * (xj - xi), yi + t * (yj - yi), 0.0)
-    model.add_member(name, node_i, node_j, mat, sec)
+    model.add_member(name, node_i, node_j, mat, sec, rotation=90)
 
 
 def build_model():
@@ -294,7 +350,15 @@ def build_model():
 
     model.add_material("Steel", E, G, NU, RHO)
     for sec_name, props in SECTIONS.items():
-        model.add_section(sec_name, props["A"], props["Iy"], props["Iz"], props["J"])
+        if USE_TIMOSHENKO:
+            model.add_section(
+                sec_name, props["A"], props["Iy"], props["Iz"], props["J"],
+                Asy=props.get("Asy"), Asz=props.get("Asz"),
+            )
+        else:
+            model.add_section(
+                sec_name, props["A"], props["Iy"], props["Iz"], props["J"],
+            )
 
     # Ridge coordinates
     rx = B_SPAN / 2.0
@@ -398,6 +462,11 @@ def _print_section_info():
         print(f"    Iy = {s['Iy'] * 1e8:.0f} cm^4  (strong axis)")
         print(f"    Iz = {s['Iz'] * 1e8:.0f} cm^4  (weak axis)")
         print(f"    J  = {s['J'] * 1e8:.2f} cm^4")
+        if USE_TIMOSHENKO and s.get('Asy') and s.get('Asz'):
+            print(f"    Asy= {s['Asy'] * 1e4:.2f} cm^2  (shear area, weak-axis bending)")
+            print(f"    Asz= {s['Asz'] * 1e4:.2f} cm^2  (shear area, strong-axis bending)")
+    beam_type = "Timoshenko (shear deformation included)" if USE_TIMOSHENKO else "Euler-Bernoulli (no shear deformation)"
+    print(f"  Beam formulation : {beam_type}")
     print()
 
 
@@ -600,7 +669,7 @@ def main():
             N = rm.axial(x=0.0, combo_name=COMBO_NAME)
             sign = "compr." if N > 0 else "tension"
             x_pts = [i * rm.L() / 20 for i in range(21)]
-            M_max = max(abs(rm.moment("Mz", x, combo_name=COMBO_NAME)) for x in x_pts)
+            M_max = max(abs(rm.moment("My", x, combo_name=COMBO_NAME)) for x in x_pts)
             print(f"  {rname:8s}  {N / 1e3:12.2f}  {M_max / 1e3:12.2f}  {sign}")
         except Exception as exc:
             print(f"  {rname:8s}  {'N/A':>12}  {'N/A':>12}  ({exc})")

@@ -299,7 +299,7 @@ class FEModel3D():
         # Return the materal name
         return name
 
-    def add_section(self, name: str, A: float, Iy: float, Iz: float, J: float) -> str:
+    def add_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Asy: float = None, Asz: float = None) -> str:
         """Adds a cross-section to the model.
 
         :param name: A unique name for the cross-section.
@@ -312,6 +312,10 @@ class FEModel3D():
         :type Iz: float
         :param J: The torsion constant of the section
         :type J: float
+        :param Asy: Shear area for shear in the local y-direction (bending about z). None = no shear deformation (Euler-Bernoulli).
+        :type Asy: float, optional
+        :param Asz: Shear area for shear in the local z-direction (bending about y). None = no shear deformation (Euler-Bernoulli).
+        :type Asz: float, optional
         """
 
         # Name the section or check it doesn't already exist
@@ -327,7 +331,7 @@ class FEModel3D():
                 count += 1
 
         # Add the new section to the model
-        self.sections[name] = Section(self, name, A, Iy, Iz, J)
+        self.sections[name] = Section(self, name, A, Iy, Iz, J, Asy, Asz)
 
         # Return the section name
         return name

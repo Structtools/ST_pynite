@@ -185,12 +185,12 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     # ------------------------------------------------------------------ #
     # Step 5: Eigenvalue solve                                             #
     #                                                                      #
-    # For compression-dominant structures, Kg11 is negative semi-definite, #
-    # so B = −Kg11 is positive semi-definite — exactly the right form for  #
-    # scipy's eigsh (which requires a positive semi-definite B).           #
+    # Reformulate  K φ = λ (−Kg) φ  as  (−Kg) φ = μ K φ  where μ = 1/λ. #
     #                                                                      #
-    # Small diagonal regularisation (eps) handles members with zero axial  #
-    # force, which would otherwise make B singular.                        #
+    # Now K is the M-matrix (symmetric positive definite — always valid    #
+    # for eigsh) and −Kg is the A-matrix (symmetric, may be indefinite).   #
+    # eigsh with which='LA' finds the largest μ → smallest positive λ.     #
+    # No epsilon regularisation is needed.                                 #
     # ------------------------------------------------------------------ #
     neg_Kg11 = (-Kg11).tocsr()
 
@@ -202,26 +202,25 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
             'buckling_analysis().'
         )
 
-    eps = float(np.abs(K11.diagonal()).mean()) * 1e-8
-    B = neg_Kg11 + sp.sparse.eye(K11.shape[0], format='csr') * eps
-
-    # eigsh requires k < N (matrix dimension)
+    n = K11.shape[0]
     # Request extra modes to improve convergence; trim to num_modes later
-    k = min(max(num_modes, 2 * num_modes), K11.shape[0] - 1)
+    k = min(max(num_modes, 2 * num_modes), n - 1)
 
     try:
         # Use a deterministic starting vector to ensure reproducible results
         rng = np.random.RandomState(42)
-        v0 = rng.rand(K11.shape[0])
-        eigenvalues, eigenvectors = eigsh(
-            K11, k=k, M=B, sigma=0.0, which='LM', v0=v0,
+        v0 = rng.rand(n)
+        # Solve (-Kg) φ = μ K φ  for the largest algebraic μ.
+        # M = K11 is SPD, so eigsh is valid even though A = -Kg11 is indefinite.
+        eigenvalues_mu, eigenvectors = eigsh(
+            neg_Kg11, k=k, M=K11, which='LA', v0=v0,
             maxiter=k * 40,
         )
     except ArpackNoConvergence as exc:
         # Use the converged eigenvalues/vectors even if not all converged
-        eigenvalues = exc.eigenvalues
+        eigenvalues_mu = exc.eigenvalues
         eigenvectors = exc.eigenvectors
-        if len(eigenvalues) == 0:
+        if len(eigenvalues_mu) == 0:
             raise RuntimeError(
                 'Eigenvalue solve failed: no eigenvalues converged. '
                 'Check that the structure has members under compression.'
@@ -233,11 +232,16 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
         ) from exc
 
     # ------------------------------------------------------------------ #
-    # Step 6: Filter positive eigenvalues and sort ascending               #
+    # Step 6: Convert μ → λ, filter positive, sort ascending              #
     # ------------------------------------------------------------------ #
-    pos_mask     = eigenvalues > 0
-    eigenvalues  = eigenvalues[pos_mask]
-    eigenvectors = eigenvectors[:, pos_mask]
+    # Keep only positive μ (positive μ → positive λ → buckling under
+    # load amplification; negative μ → load reversal needed, not physical)
+    pos_mask      = eigenvalues_mu > 0
+    eigenvalues_mu = eigenvalues_mu[pos_mask]
+    eigenvectors   = eigenvectors[:, pos_mask]
+
+    # Convert μ = 1/λ  →  λ = 1/μ
+    eigenvalues = 1.0 / eigenvalues_mu
 
     order        = np.argsort(eigenvalues)
     eigenvalues  = eigenvalues[order][:num_modes]

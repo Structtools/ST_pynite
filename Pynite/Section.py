@@ -14,7 +14,7 @@ class Section():
 
     This class stores all properties related to the geometry of the member
     """
-    def __init__(self, model: 'FEModel3D', name: str, A: float, Iy: float, Iz: float, J: float) -> None:
+    def __init__(self, model: 'FEModel3D', name: str, A: float, Iy: float, Iz: float, J: float, Asy: float = None, Asz: float = None) -> None:
         """
         :param model: The finite element model to which this section belongs
         :type model: FEModel3D
@@ -28,6 +28,10 @@ class Section():
         :type Iz: float
         :param J: The torsion constant of the section
         :type J: float
+        :param Asy: Shear area for shear in the local y-direction (bending about z). None = no shear deformation.
+        :type Asy: float, optional
+        :param Asz: Shear area for shear in the local z-direction (bending about y). None = no shear deformation.
+        :type Asz: float, optional
         """        
         self.model: 'FEModel3D' = model
         self.name: str = name
@@ -35,6 +39,8 @@ class Section():
         self.Iy: float = Iy
         self.Iz: float = Iz
         self.J: float = J
+        self.Asy: float = Asy
+        self.Asz: float = Asz
     
     def Phi(self, fx: float = 0, my: float = 0, mz: float = 0):
         """

@@ -115,10 +115,11 @@ LOAD_R_FX = 0.0   # node R
 COL_LOAD_1_FX = 0.0   # Col1 (A->B)
 COL_LOAD_2_FX = 0.0   # Col2 (D->C)
 
-# --- Lateral bracing at eave/ridge nodes ------------------------------------
-# True  = restrain DZ at nodes B, C, R
-# False = no lateral restraint -- full 3D eigenvalue
-LATERAL_BRACE_NODES = True
+# --- Lateral bracing / 2D constraint ----------------------------------------
+# True  = restrain out-of-plane DOFs (DZ, RX, RY) at all nodes
+#         forces pure in-plane buckling — use for braced frames
+# False = full 3D analysis including lateral-torsional buckling
+LATERAL_BRACE_NODES = False
 
 # --- Buckling analysis settings --------------------------------------------
 NUM_MODES = 5          # number of buckling modes to compute
@@ -155,7 +156,7 @@ _PRESETS = {
         LOAD_R_FX=0.0,
         COL_LOAD_1_FX=0.0,
         COL_LOAD_2_FX=0.0,
-        LATERAL_BRACE_NODES=True,
+        LATERAL_BRACE_NODES=False,
         N_ELEM=8,
         NUM_MODES=5,
     ),
@@ -180,7 +181,7 @@ _PRESETS = {
         LOAD_R_FX=0.0,
         COL_LOAD_1_FX=0.0,
         COL_LOAD_2_FX=0.0,
-        LATERAL_BRACE_NODES=True,
+        LATERAL_BRACE_NODES=False,
         N_ELEM=8,
         NUM_MODES=5,
     ),
@@ -205,7 +206,7 @@ _PRESETS = {
         LOAD_R_FX=0.0,
         COL_LOAD_1_FX=0.0,
         COL_LOAD_2_FX=0.0,
-        LATERAL_BRACE_NODES=True,
+        LATERAL_BRACE_NODES=False,
         N_ELEM=8,
         NUM_MODES=5,
     ),
@@ -230,7 +231,7 @@ _PRESETS = {
         LOAD_R_FX=0.0,
         COL_LOAD_1_FX=10e3,
         COL_LOAD_2_FX=10e3,
-        LATERAL_BRACE_NODES=True,
+        LATERAL_BRACE_NODES=False,
         N_ELEM=8,
         NUM_MODES=5,
     ),
@@ -270,7 +271,7 @@ def _add_column(
         nn = f"_{name}_int{i}"
         model.add_node(nn, base_x, i * h, 0.0)
     model.def_support(base_node, *base_support)
-    model.add_member(name, base_node, top_node, mat, sec)
+    model.add_member(name, base_node, top_node, mat, sec, rotation=90)
 
 
 def _add_beam(
@@ -287,7 +288,7 @@ def _add_beam(
         t = i / n_elem
         nn = f"_{name}_int{i}"
         model.add_node(nn, xi + t * (xj - xi), yi + t * (yj - yi), 0.0)
-    model.add_member(name, node_i, node_j, mat, sec, tension_only=tension_only)
+    model.add_member(name, node_i, node_j, mat, sec, rotation=90, tension_only=tension_only)
 
 
 def build_model():
@@ -626,7 +627,7 @@ def main():
             N = m.axial(x=0.0, combo_name=COMBO_NAME)
             sign = "compr." if N > 0 else "tension"
             x_pts = [i * m.L() / 20 for i in range(21)]
-            M_max = max(abs(m.moment("Mz", x, combo_name=COMBO_NAME)) for x in x_pts)
+            M_max = max(abs(m.moment("My", x, combo_name=COMBO_NAME)) for x in x_pts)
             print(f"  {mname:8s}  {N / 1e3:12.2f}  {M_max / 1e3:12.2f}  {sign}")
         except Exception as exc:
             print(f"  {mname:8s}  {'N/A':>12}  {'N/A':>12}  ({exc})")

@@ -189,19 +189,27 @@ class Member3D():
         A = self.section.A
         L = self.L()
 
-        # Create the uncondensed local stiffness matrix
-        k = array([[A*E/L,  0,             0,             0,      0,            0,            -A*E/L, 0,             0,             0,      0,            0           ],
-                   [0,      12*E*Iz/L**3,  0,             0,      0,            6*E*Iz/L**2,  0,      -12*E*Iz/L**3, 0,             0,      0,            6*E*Iz/L**2 ],
-                   [0,      0,             12*E*Iy/L**3,  0,      -6*E*Iy/L**2, 0,            0,      0,             -12*E*Iy/L**3, 0,      -6*E*Iy/L**2, 0           ],
-                   [0,      0,             0,             G*J/L,  0,            0,            0,      0,             0,             -G*J/L, 0,            0           ],
-                   [0,      0,             -6*E*Iy/L**2,  0,      4*E*Iy/L,     0,            0,      0,             6*E*Iy/L**2,   0,      2*E*Iy/L,     0           ],
-                   [0,      6*E*Iz/L**2,   0,             0,      0,            4*E*Iz/L,     0,      -6*E*Iz/L**2,  0,             0,      0,            2*E*Iz/L    ],
-                   [-A*E/L, 0,             0,             0,      0,            0,            A*E/L,  0,             0,             0,      0,            0           ],
-                   [0,      -12*E*Iz/L**3, 0,             0,      0,            -6*E*Iz/L**2, 0,      12*E*Iz/L**3,  0,             0,      0,            -6*E*Iz/L**2],
-                   [0,      0,             -12*E*Iy/L**3, 0,      6*E*Iy/L**2,  0,            0,      0,             12*E*Iy/L**3,  0,      6*E*Iy/L**2,  0           ],
-                   [0,      0,             0,             -G*J/L, 0,            0,            0,      0,             0,             G*J/L,  0,            0           ],
-                   [0,      0,             -6*E*Iy/L**2,  0,      2*E*Iy/L,     0,            0,      0,             6*E*Iy/L**2,   0,      4*E*Iy/L,     0           ],
-                   [0,      6*E*Iz/L**2,   0,             0,      0,            2*E*Iz/L,     0,      -6*E*Iz/L**2,  0,             0,      0,            4*E*Iz/L    ]])
+        # Timoshenko shear deformation parameters
+        # Phi_y corresponds to bending about the y-axis (using Iy, shear area Asz)
+        # Phi_z corresponds to bending about the z-axis (using Iz, shear area Asy)
+        Asy = getattr(self.section, 'Asy', None)
+        Asz = getattr(self.section, 'Asz', None)
+        Phi_y = 12 * E * Iy / (G * Asz * L**2) if Asz else 0.0
+        Phi_z = 12 * E * Iz / (G * Asy * L**2) if Asy else 0.0
+
+        # Create the uncondensed local stiffness matrix (Timoshenko beam)
+        k = array([[A*E/L,  0,                            0,                            0,      0,                            0,                            -A*E/L, 0,                             0,                            0,      0,                            0                            ],
+                   [0,      12*E*Iz/(L**3*(1+Phi_z)),     0,                            0,      0,                            6*E*Iz/(L**2*(1+Phi_z)),      0,      -12*E*Iz/(L**3*(1+Phi_z)),     0,                            0,      0,                            6*E*Iz/(L**2*(1+Phi_z))      ],
+                   [0,      0,                            12*E*Iy/(L**3*(1+Phi_y)),     0,      -6*E*Iy/(L**2*(1+Phi_y)),     0,                            0,      0,                             -12*E*Iy/(L**3*(1+Phi_y)),    0,      -6*E*Iy/(L**2*(1+Phi_y)),     0                            ],
+                   [0,      0,                            0,                            G*J/L,  0,                            0,                            0,      0,                             0,                            -G*J/L, 0,                            0                            ],
+                   [0,      0,                            -6*E*Iy/(L**2*(1+Phi_y)),     0,      (4+Phi_y)*E*Iy/(L*(1+Phi_y)), 0,                            0,      0,                             6*E*Iy/(L**2*(1+Phi_y)),      0,      (2-Phi_y)*E*Iy/(L*(1+Phi_y)), 0                            ],
+                   [0,      6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (4+Phi_z)*E*Iz/(L*(1+Phi_z)), 0,      -6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (2-Phi_z)*E*Iz/(L*(1+Phi_z)) ],
+                   [-A*E/L, 0,                            0,                            0,      0,                            0,                            A*E/L,  0,                             0,                            0,      0,                            0                            ],
+                   [0,      -12*E*Iz/(L**3*(1+Phi_z)),    0,                            0,      0,                            -6*E*Iz/(L**2*(1+Phi_z)),     0,      12*E*Iz/(L**3*(1+Phi_z)),      0,                            0,      0,                            -6*E*Iz/(L**2*(1+Phi_z))     ],
+                   [0,      0,                            -12*E*Iy/(L**3*(1+Phi_y)),    0,      6*E*Iy/(L**2*(1+Phi_y)),      0,                            0,      0,                             12*E*Iy/(L**3*(1+Phi_y)),     0,      6*E*Iy/(L**2*(1+Phi_y)),      0                            ],
+                   [0,      0,                            0,                            -G*J/L, 0,                            0,                            0,      0,                             0,                            G*J/L,  0,                            0                            ],
+                   [0,      0,                            -6*E*Iy/(L**2*(1+Phi_y)),     0,      (2-Phi_y)*E*Iy/(L*(1+Phi_y)), 0,                            0,      0,                             6*E*Iy/(L**2*(1+Phi_y)),      0,      (4+Phi_y)*E*Iy/(L*(1+Phi_y)), 0                            ],
+                   [0,      6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (2-Phi_z)*E*Iz/(L*(1+Phi_z)), 0,      -6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (4+Phi_z)*E*Iz/(L*(1+Phi_z)) ]])
 
         # Return the uncondensed local stiffness matrix
         return k
