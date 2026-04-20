@@ -49,8 +49,10 @@ from Pynite import FEModel3D
 #  2  Midspan P      fixed bases, midspan point loads on rafters (global FY)
 #  3  Eave FX loads  fixed bases, FX point loads at eave nodes B & C
 #  4  Wind-like      fixed bases, column FX UDL + asymmetric rafter FY UDLs
+#  5  Asym rafter    fixed bases, asymmetric rafter FY UDLs (no horiz. load)
+#  6  Col FX only    fixed bases, column FX UDL only
 #
-SCENARIO = int(os.getenv("SCENARIO", "1"))
+SCENARIO = int(os.getenv("SCENARIO", "4"))
 
 # ============================================================================
 # PARAMETERS -- used when SCENARIO = 0, or as defaults overridden by presets
@@ -65,17 +67,19 @@ RIDGE_H = 1.0    # ridge rise above eave level
 N_ELEM = 8
 
 # --- Material: steel (SI units: N, m, Pa) -----------------------------------
-E = 200e9    # Young's modulus
-G = 80e9     # Shear modulus
+E = 210e9    # Young's modulus
+G = 80.769e9     # Shear modulus
 NU = 0.3     # Poisson's ratio
 RHO = 0.0    # density -- set to 7850 if you want self-weight included
 
 # --- Cross-sections ---------------------------------------------------------
-# Keys: (A [m^2], Iy [m^4], Iz [m^4], J [m^4])
+# Keys: (A [m^2], Iy [m^4], Iz [m^4], J [m^4], Asy [m^2], Asz [m^2])
+# Asy = shear area for y-dir shear (bending about z / weak-axis) = flange area
+# Asz = shear area for z-dir shear (bending about y / strong-axis) = web area
 SECTIONS = {
-    "IPE200": dict(A=28.5e-4, Iy=1943e-8, Iz=142e-8, J=7.0e-8),
-    "IPE300": dict(A=53.8e-4, Iy=8356e-8, Iz=604e-8, J=20.1e-8),
-    "HEA200": dict(A=53.8e-4, Iy=3692e-8, Iz=1336e-8, J=21.1e-8),
+    "IPE200": dict(A=28.48e-4, Iy=1943e-8, Iz=142e-8, J=7.0e-8, Asy=17.0e-4, Asz=14.02e-4),
+    "IPE300": dict(A=53.8e-4, Iy=8356e-8, Iz=604e-8, J=20.1e-8, Asy=32.10e-4, Asz=25.67e-4),
+    "HEA200": dict(A=53.8e-4, Iy=3692e-8, Iz=1336e-8, J=21.1e-8, Asy=40.0e-4, Asz=18.05e-4),
 }
 
 # Which section for each member type
@@ -119,7 +123,12 @@ COL_LOAD_2_FX = 0.0   # Col2 (D->C)
 # True  = restrain out-of-plane DOFs (DZ, RX, RY) at all nodes
 #         forces pure in-plane buckling — use for braced frames
 # False = full 3D analysis including lateral-torsional buckling
-LATERAL_BRACE_NODES = False
+LATERAL_BRACE_NODES = True
+
+# --- Beam element formulation -----------------------------------------------
+# True  = Timoshenko beam (includes shear deformation via Asy/Asz)
+# False = Euler-Bernoulli (classical, no shear deformation)
+USE_TIMOSHENKO = True
 
 # --- Buckling analysis settings --------------------------------------------
 NUM_MODES = 5          # number of buckling modes to compute
@@ -128,6 +137,22 @@ COMBO_NAME = "Combo 1"
 # ============================================================================
 # END OF PARAMETERS
 # ============================================================================
+
+# ---------------------------------------------------------------------------
+# FEM Design reference results (critical parameters / load multipliers)
+# ---------------------------------------------------------------------------
+# Each key is a scenario number; values are lists of lambda_cr per mode.
+# Source: FEM Design 2024, IPE200 all members, E=210 GPa, G=80.769 GPa,
+#         rigid line supports (out-of-plane restrained), member-length loads,
+#         with diagonal brace A->C (tension only).
+# Populated from FEM Design screenshots (LC1=scenario 1, etc.)
+
+_FEM_DESIGN_REF = {
+    1: [202.072, 318.426, 420.230, 634.467],
+    2: [510.375, 836.886, 1125.142, 1647.320],
+    3: [622.161, 1012.819, 1288.233, 1868.043],
+    4: [414.113, 659.500, 1064.552, 1455.810],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +181,7 @@ _PRESETS = {
         LOAD_R_FX=0.0,
         COL_LOAD_1_FX=0.0,
         COL_LOAD_2_FX=0.0,
-        LATERAL_BRACE_NODES=False,
+        LATERAL_BRACE_NODES=True,
         N_ELEM=8,
         NUM_MODES=5,
     ),
@@ -181,7 +206,7 @@ _PRESETS = {
         LOAD_R_FX=0.0,
         COL_LOAD_1_FX=0.0,
         COL_LOAD_2_FX=0.0,
-        LATERAL_BRACE_NODES=False,
+        LATERAL_BRACE_NODES=True,
         N_ELEM=8,
         NUM_MODES=5,
     ),
@@ -206,7 +231,7 @@ _PRESETS = {
         LOAD_R_FX=0.0,
         COL_LOAD_1_FX=0.0,
         COL_LOAD_2_FX=0.0,
-        LATERAL_BRACE_NODES=False,
+        LATERAL_BRACE_NODES=True,
         N_ELEM=8,
         NUM_MODES=5,
     ),
@@ -231,7 +256,57 @@ _PRESETS = {
         LOAD_R_FX=0.0,
         COL_LOAD_1_FX=10e3,
         COL_LOAD_2_FX=10e3,
-        LATERAL_BRACE_NODES=False,
+        LATERAL_BRACE_NODES=True,
+        N_ELEM=8,
+        NUM_MODES=5,
+    ),
+    5: dict(
+        name="Braced pitched frame, asymmetric rafter FY UDLs (no horizontal load)",
+        H=3.0,
+        B_SPAN=5.0,
+        RIDGE_H=1.0,
+        COLUMN_SEC="IPE200",
+        RAFTER_SEC="IPE200",
+        BRACE_SEC="IPE200",
+        _base="FIXED",
+        RAFTER_LOAD_1=-10e3,
+        RAFTER_LOAD_2=+10e3,
+        RAFTER_MID_LOAD_1=0.0,
+        RAFTER_MID_LOAD_2=0.0,
+        LOAD_B=0.0,
+        LOAD_C=0.0,
+        LOAD_R=0.0,
+        LOAD_B_FX=0.0,
+        LOAD_C_FX=0.0,
+        LOAD_R_FX=0.0,
+        COL_LOAD_1_FX=0.0,
+        COL_LOAD_2_FX=0.0,
+        LATERAL_BRACE_NODES=True,
+        N_ELEM=8,
+        NUM_MODES=5,
+    ),
+    6: dict(
+        name="Braced pitched frame, column FX UDL only (no rafter loads)",
+        H=3.0,
+        B_SPAN=5.0,
+        RIDGE_H=1.0,
+        COLUMN_SEC="IPE200",
+        RAFTER_SEC="IPE200",
+        BRACE_SEC="IPE200",
+        _base="FIXED",
+        RAFTER_LOAD_1=0.0,
+        RAFTER_LOAD_2=0.0,
+        RAFTER_MID_LOAD_1=0.0,
+        RAFTER_MID_LOAD_2=0.0,
+        LOAD_B=0.0,
+        LOAD_C=0.0,
+        LOAD_R=0.0,
+        LOAD_B_FX=0.0,
+        LOAD_C_FX=0.0,
+        LOAD_R_FX=0.0,
+        COL_LOAD_1_FX=10e3,
+        COL_LOAD_2_FX=10e3,
+        LATERAL_BRACE_NODES=True,
         N_ELEM=8,
         NUM_MODES=5,
     ),
@@ -296,7 +371,15 @@ def build_model():
 
     model.add_material("Steel", E, G, NU, RHO)
     for sec_name, props in SECTIONS.items():
-        model.add_section(sec_name, props["A"], props["Iy"], props["Iz"], props["J"])
+        if USE_TIMOSHENKO:
+            model.add_section(
+                sec_name, props["A"], props["Iy"], props["Iz"], props["J"],
+                Asy=props.get("Asy"), Asz=props.get("Asz"),
+            )
+        else:
+            model.add_section(
+                sec_name, props["A"], props["Iy"], props["Iz"], props["J"],
+            )
 
     # Ridge coordinates
     rx = B_SPAN / 2.0
@@ -407,11 +490,16 @@ def _brace_length():
 def _print_section_info():
     for role, sec_name in (("Column", COLUMN_SEC), ("Rafter", RAFTER_SEC), ("Brace", BRACE_SEC)):
         s = SECTIONS[sec_name]
-        print(f"  {role} section  : {sec_name}")
+        print(f"  {role} section : {sec_name}")
         print(f"    A  = {s['A'] * 1e4:.2f} cm^2")
         print(f"    Iy = {s['Iy'] * 1e8:.0f} cm^4  (strong axis)")
         print(f"    Iz = {s['Iz'] * 1e8:.0f} cm^4  (weak axis)")
         print(f"    J  = {s['J'] * 1e8:.2f} cm^4")
+        if USE_TIMOSHENKO and s.get('Asy') and s.get('Asz'):
+            print(f"    Asy= {s['Asy'] * 1e4:.2f} cm^2  (shear area, weak-axis bending)")
+            print(f"    Asz= {s['Asz'] * 1e4:.2f} cm^2  (shear area, strong-axis bending)")
+    beam_type = "Timoshenko (shear deformation included)" if USE_TIMOSHENKO else "Euler-Bernoulli (no shear deformation)"
+    print(f"  Beam formulation : {beam_type}")
     print()
 
 
@@ -634,6 +722,24 @@ def main():
     print(SEP)
     print()
     print("  Done.  Compare Lambda_cr and L_cr/L with PolyFrame / FEM Design output.")
+
+    # --- FEM Design comparison ------------------------------------------------
+    fem_ref = _FEM_DESIGN_REF.get(SCENARIO)
+    if fem_ref:
+        print()
+        print(SEP)
+        print("  FEM Design comparison")
+        print(SEP)
+        print(f"  {'Mode':>4}  {'PyNite':>10}  {'FEM Design':>10}  {'Diff':>8}")
+        print(SEP)
+        for i, lam in enumerate(lams):
+            if i < len(fem_ref):
+                ref = fem_ref[i]
+                diff = (lam - ref) / ref * 100
+                print(f"  {i + 1:4d}  {lam:10.3f}  {ref:10.3f}  {diff:+7.1f}%")
+            else:
+                print(f"  {i + 1:4d}  {lam:10.3f}  {'n/a':>10}")
+        print(SEP)
 
 
 if __name__ == "__main__":

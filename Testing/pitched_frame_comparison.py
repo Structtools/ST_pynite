@@ -140,6 +140,21 @@ COMBO_NAME = "Combo 1"
 # END OF PARAMETERS
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# FEM Design reference results (critical parameters / load multipliers)
+# ---------------------------------------------------------------------------
+# Each key is a scenario number; values are lists of lambda_cr per mode.
+# Source: FEM Design 2024, IPE200 all members, E=210 GPa, G=80.769 GPa,
+#         rigid line supports (out-of-plane restrained), member-length loads.
+
+_FEM_DESIGN_REF = {
+    1: [95.414, 236.049, 354.718, 465.246],
+    2: [255.666, 589.676, 939.767, 1238.565],
+    3: [2071.518, 2172.698],
+    4: [980.953, 1172.103],
+    5: [669.486, 769.573],
+}
+
 
 # ---------------------------------------------------------------------------
 # Scenario presets
@@ -676,6 +691,24 @@ def main():
     print(SEP)
     print()
     print("  Done.  Compare Lambda_cr and L_cr/L with PolyFrame / FEM Design output.")
+
+    # --- FEM Design comparison ------------------------------------------------
+    fem_ref = _FEM_DESIGN_REF.get(SCENARIO)
+    if fem_ref:
+        print()
+        print(SEP)
+        print("  FEM Design comparison")
+        print(SEP)
+        print(f"  {'Mode':>4}  {'PyNite':>10}  {'FEM Design':>10}  {'Diff':>8}")
+        print(SEP)
+        for i, lam in enumerate(lams):
+            if i < len(fem_ref):
+                ref = fem_ref[i]
+                diff = (lam - ref) / ref * 100
+                print(f"  {i + 1:4d}  {lam:10.3f}  {ref:10.3f}  {diff:+7.1f}%")
+            else:
+                print(f"  {i + 1:4d}  {lam:10.3f}  {'n/a':>10}")
+        print(SEP)
 
 
 if __name__ == "__main__":
