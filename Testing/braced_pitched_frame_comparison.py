@@ -236,7 +236,7 @@ _PRESETS = {
         NUM_MODES=5,
     ),
     4: dict(
-        name="Braced pitched frame, wind-like: column FX UDL + asymmetric rafter FY UDLs",
+        name="Braced pitched frame, wind-like: eave FX point loads + asymmetric rafter FY UDLs",
         H=3.0,
         B_SPAN=5.0,
         RIDGE_H=1.0,
@@ -251,11 +251,11 @@ _PRESETS = {
         LOAD_B=0.0,
         LOAD_C=0.0,
         LOAD_R=0.0,
-        LOAD_B_FX=0.0,
-        LOAD_C_FX=0.0,
+        LOAD_B_FX=10e3,
+        LOAD_C_FX=-10e3,
         LOAD_R_FX=0.0,
-        COL_LOAD_1_FX=10e3,
-        COL_LOAD_2_FX=10e3,
+        COL_LOAD_1_FX=0.0,
+        COL_LOAD_2_FX=0.0,
         LATERAL_BRACE_NODES=True,
         N_ELEM=8,
         NUM_MODES=5,
@@ -414,12 +414,14 @@ def build_model():
         rx, ry, B_SPAN, H,
     )
 
-    # Diagonal brace (A -> C) -- tension only
+    # Diagonal brace (A -> C) -- tension only, bar element (axial only)
     _add_beam(
         model, "Brc", "A", "C", "Steel", BRACE_SEC, N_ELEM,
         0.0, 0.0, B_SPAN, H,
         tension_only=True,
     )
+    # Release all end moments so the brace acts as a truss/bar element
+    model.def_releases("Brc", Ryi=True, Rzi=True, Ryj=True, Rzj=True)
 
     # --- Distributed rafter loads (global FY) --------------------------------
     if RAFTER_LOAD_1 != 0.0:
