@@ -773,6 +773,17 @@ class Member3D():
         # Initialize the fixed end reaction vector
         fer = zeros((12, 1))
 
+        # Compute Timoshenko shear deformation parameters for FER
+        E = self.material.E
+        G = self.material.G
+        Iy = self.section.Iy
+        Iz = self.section.Iz
+        L = self.L()
+        Asy = getattr(self.section, 'Asy', None)
+        Asz = getattr(self.section, 'Asz', None)
+        Phi_y = 12 * E * Iy / (G * Asz * L**2) if Asz else 0.0
+        Phi_z = 12 * E * Iz / (G * Asy * L**2) if Asy else 0.0
+
         # Get the requested load combination
         combo = self.model.load_combos[combo_name]
 
@@ -786,35 +797,35 @@ class Member3D():
                 if ptLoad[3] == case:
 
                     if ptLoad[0] == 'Fx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*ptLoad[1], ptLoad[2], self.L()))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*ptLoad[1], ptLoad[2], L))
                     elif ptLoad[0] == 'Fy':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], self.L(), 'Fy'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], L, 'Fy', Phi_z))
                     elif ptLoad[0] == 'Fz':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], self.L(), 'Fz'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], L, 'Fz', Phi_y))
                     elif ptLoad[0] == 'Mx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*ptLoad[1], ptLoad[2], self.L()))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*ptLoad[1], ptLoad[2], L))
                     elif ptLoad[0] == 'My':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], self.L(), 'My'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], L, 'My', Phi_y))
                     elif ptLoad[0] == 'Mz':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], self.L(), 'Mz'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], L, 'Mz', Phi_z))
                     elif ptLoad[0] == 'FX' or ptLoad[0] == 'FY' or ptLoad[0] == 'FZ':
                         FX, FY, FZ = 0, 0, 0
                         if ptLoad[0] == 'FX': FX = 1
                         if ptLoad[0] == 'FY': FY = 1
                         if ptLoad[0] == 'FZ': FZ = 1
                         f = self.T()[:3, :][:, :3] @ array([FX*ptLoad[1], FY*ptLoad[1], FZ*ptLoad[1]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*f[0], ptLoad[2], self.L()))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[1], ptLoad[2], self.L(), 'Fy'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[2], ptLoad[2], self.L(), 'Fz'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*f[0], ptLoad[2], L))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[1], ptLoad[2], L, 'Fy', Phi_z))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[2], ptLoad[2], L, 'Fz', Phi_y))
                     elif ptLoad[0] == 'MX' or ptLoad[0] == 'MY' or ptLoad[0] == 'MZ':
                         MX, MY, MZ = 0, 0, 0
                         if ptLoad[0] == 'MX': MX = 1
                         if ptLoad[0] == 'MY': MY = 1
                         if ptLoad[0] == 'MZ': MZ = 1
                         f = self.T()[:3, :][:, :3] @ array([MX*ptLoad[1], MY*ptLoad[1], MZ*ptLoad[1]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*f[0], ptLoad[2], self.L()))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[1], ptLoad[2], self.L(), 'My'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[2], ptLoad[2], self.L(), 'Mz'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*f[0], ptLoad[2], L))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[1], ptLoad[2], L, 'My', Phi_y))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[2], ptLoad[2], L, 'Mz', Phi_z))
                     else:
                         raise Exception('Invalid member point load direction specified.')
 
@@ -825,9 +836,11 @@ class Member3D():
                 if distLoad[5] == case:
 
                     if distLoad[0] == 'Fx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], self.L()))
-                    elif distLoad[0] == 'Fy' or distLoad[0] == 'Fz':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], self.L(), distLoad[0]))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], L))
+                    elif distLoad[0] == 'Fy':
+                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], L, 'Fy', Phi_z))
+                    elif distLoad[0] == 'Fz':
+                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], L, 'Fz', Phi_y))
                     elif distLoad[0] == 'FX' or distLoad[0] == 'FY' or distLoad[0] == 'FZ':
                         FX, FY, FZ = 0, 0, 0
                         if distLoad[0] == 'FX': FX = 1
@@ -835,9 +848,9 @@ class Member3D():
                         if distLoad[0] == 'FZ': FZ = 1
                         w1 = self.T()[:3, :][:, :3] @ array([FX*distLoad[1], FY*distLoad[1], FZ*distLoad[1]])
                         w2 = self.T()[:3, :][:, :3] @ array([FX*distLoad[2], FY*distLoad[2], FZ*distLoad[2]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*w1[0], factor*w2[0], distLoad[3], distLoad[4], self.L()))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[1], factor*w2[1], distLoad[3], distLoad[4], self.L(), 'Fy'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[2], factor*w2[2], distLoad[3], distLoad[4], self.L(), 'Fz'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*w1[0], factor*w2[0], distLoad[3], distLoad[4], L))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[1], factor*w2[1], distLoad[3], distLoad[4], L, 'Fy', Phi_z))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[2], factor*w2[2], distLoad[3], distLoad[4], L, 'Fz', Phi_y))
 
         # Return the fixed end reaction vector, uncondensed
         return fer
@@ -2700,12 +2713,21 @@ class Member3D():
         # Get the member's length and stiffness properties
         L = self.L()
         E = self.material.E
+        G = self.material.G
         A = self.section.A
         Iz = self.section.Iz
         Iy = self.section.Iy
         SegmentsZ = self.SegmentsZ
         SegmentsY = self.SegmentsY
         SegmentsX = self.SegmentsX
+
+        # Timoshenko shear deformation parameters
+        Asy = getattr(self.section, 'Asy', None)
+        Asz = getattr(self.section, 'Asz', None)
+        Phi_y = 12 * E * Iy / (G * Asz * L**2) if Asz else 0.0
+        Phi_z = 12 * E * Iz / (G * Asy * L**2) if Asy else 0.0
+        kAG_z = G * Asy if Asy else None  # shear rigidity for z-bending (Fy direction)
+        kAG_y = G * Asz if Asz else None  # shear rigidity for y-bending (Fz direction)
 
         # Get the load combination to segment the member for
         combo = self.model.load_combos[combo_name]
@@ -2737,6 +2759,7 @@ class Member3D():
             newSeg.x2 = disconts[index+1]  # Segment end location
             newSeg.EI = E*Iz               # Segment flexural stiffness
             newSeg.EA = E*A                # Segment axial stiffness
+            newSeg.kAG = kAG_z             # Segment shear rigidity (Timoshenko)
             SegmentsZ.append(newSeg)       # Add the segment to the list
 
             # y-direction segments (bending about local y-axis)
@@ -2745,6 +2768,7 @@ class Member3D():
             newSeg.x2 = disconts[index+1]  # Segment end location
             newSeg.EI = E*Iy               # Segment flexural stiffness
             newSeg.EA = E*A                # Segment axial stiffness
+            newSeg.kAG = kAG_y             # Segment shear rigidity (Timoshenko)
             SegmentsY.append(newSeg)       # Add the segment to the list
 
             # x-direction segments (for torsional moment)
@@ -2776,8 +2800,8 @@ class Member3D():
         delta2z = d[8, 0]    # local z displacement at end of member
         SegmentsZ[0].delta1 = delta1y
         SegmentsY[0].delta1 = delta1z
-        SegmentsZ[0].theta1 = 1/3*((m1z - fem1z)*L/(E*Iz) - (m2z - fem2z)*L/(2*E*Iz) + 3*(delta2y - delta1y)/L)
-        SegmentsY[0].theta1 = -1/3*((m1y - fem1y)*L/(E*Iy) - (m2y - fem2y)*L/(2*E*Iy) + 3*(delta2z - delta1z)/L)
+        SegmentsZ[0].theta1 = L/(12*E*Iz)*((4+Phi_z)*(m1z - fem1z) - (2-Phi_z)*(m2z - fem2z)) + (delta2y - delta1y)/L
+        SegmentsY[0].theta1 = -L/(12*E*Iy)*((4+Phi_y)*(m1y - fem1y) - (2-Phi_y)*(m2y - fem2y)) - (delta2z - delta1z)/L
 
         # Add the axial deflection at the start of the member
         SegmentsZ[0].delta_x1 = d[0, 0]

@@ -299,7 +299,7 @@ class FEModel3D():
         # Return the materal name
         return name
 
-    def add_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Asy: float = None, Asz: float = None) -> str:
+    def add_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Asy: float | None = None, Asz: float | None = None) -> str:
         """Adds a cross-section to the model.
 
         :param name: A unique name for the cross-section.

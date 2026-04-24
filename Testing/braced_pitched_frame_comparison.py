@@ -414,11 +414,14 @@ def build_model():
         rx, ry, B_SPAN, H,
     )
 
-    # Diagonal brace (A -> C) -- tension only, bar element (axial only)
+    # Diagonal brace (A -> C) -- modeled as linear for buckling comparison
+    # Note: tension_only=True would not be enforced during the buckling
+    # pre-solve (single first-order static solve, no TC iteration), so we
+    # use a regular member to keep the comparison honest.
     _add_beam(
         model, "Brc", "A", "C", "Steel", BRACE_SEC, N_ELEM,
         0.0, 0.0, B_SPAN, H,
-        tension_only=True,
+        tension_only=False,
     )
     # Release all end moments so the brace acts as a truss/bar element
     model.def_releases("Brc", Ryi=True, Rzi=True, Ryj=True, Rzj=True)

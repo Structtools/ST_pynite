@@ -14,7 +14,7 @@ class Section():
 
     This class stores all properties related to the geometry of the member
     """
-    def __init__(self, model: 'FEModel3D', name: str, A: float, Iy: float, Iz: float, J: float, Asy: float = None, Asz: float = None) -> None:
+    def __init__(self, model: 'FEModel3D', name: str, A: float, Iy: float, Iz: float, J: float, Asy: float | None = None, Asz: float | None = None) -> None:
         """
         :param model: The finite element model to which this section belongs
         :type model: FEModel3D
@@ -39,8 +39,8 @@ class Section():
         self.Iy: float = Iy
         self.Iz: float = Iz
         self.J: float = J
-        self.Asy: float = Asy
-        self.Asz: float = Asz
+        self.Asy: float | None = Asy
+        self.Asz: float | None = Asz
     
     def Phi(self, fx: float = 0, my: float = 0, mz: float = 0):
         """

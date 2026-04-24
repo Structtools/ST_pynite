@@ -234,14 +234,20 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     # ------------------------------------------------------------------ #
     # Step 6: Convert μ → λ, filter positive, sort ascending              #
     # ------------------------------------------------------------------ #
-    # Keep only positive μ (positive μ → positive λ → buckling under
-    # load amplification; negative μ → load reversal needed, not physical)
-    pos_mask      = eigenvalues_mu > 0
+    # Keep only safely positive μ values. Very small positive values can
+    # occur for nullspace/near-nullspace modes and are not safe to invert.
+    mu_scale = np.max(np.abs(eigenvalues_mu)) if len(eigenvalues_mu) else 0.0
+    mu_tol = max(1e-12, np.finfo(float).eps * max(1.0, mu_scale))
+    pos_mask      = eigenvalues_mu > mu_tol
     eigenvalues_mu = eigenvalues_mu[pos_mask]
     eigenvectors   = eigenvectors[:, pos_mask]
 
-    # Convert μ = 1/λ  →  λ = 1/μ
+    # Convert μ = 1/λ  →  λ = 1/μ, then discard any non-finite results as
+    # a final safeguard against numerical issues.
     eigenvalues = 1.0 / eigenvalues_mu
+    finite_mask = np.isfinite(eigenvalues)
+    eigenvalues = eigenvalues[finite_mask]
+    eigenvectors = eigenvectors[:, finite_mask]
 
     order        = np.argsort(eigenvalues)
     eigenvalues  = eigenvalues[order][:num_modes]

@@ -54,6 +54,7 @@ from Pynite import FEModel3D
 #  3  Eave FX loads  fixed bases, FX point loads at eave nodes B & C
 #  4  Wind-like      fixed bases, column FX UDL + asymmetric rafter FY UDLs
 #  5  Asym rafter    fixed bases, asymmetric rafter FY UDLs (no horiz. load)
+#  6  Col FX only    fixed bases, column FX UDLs only (no rafter load)
 #
 SCENARIO = int(os.getenv("SCENARIO", "4"))
 
@@ -282,7 +283,7 @@ _PRESETS = {
         NUM_MODES=5,
     ),
     6: dict(
-        name="Pitched frame, wind-like: asymmetric rafter FY UDLs",
+        name="Pitched frame, fixed bases, column FX UDLs only (no rafter load)",
         H=3.0,
         B_SPAN=5.0,
         RIDGE_H=1.0,
