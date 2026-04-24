@@ -117,8 +117,15 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     3. Run a first-order static solve for *combo_name* to populate member
        axial forces (required for Kg assembly).
     4. Assemble K and Kg; partition both to free DOFs.
-    5. Solve ``eigsh(K11, M=−Kg11, sigma=0, which='LM', k=num_modes)``.
-    6. Filter positive eigenvalues and sort ascending.
+    5. Reformulate ``K φ = λ (−Kg) φ`` as ``(−Kg) φ = μ K φ`` (where
+       ``μ = 1/λ``), then call ``eigsh(−Kg11, M=K11, which='LA', k=k)``
+       to find the *largest algebraic* μ values.  K11 is the symmetric
+       positive-definite M-matrix; −Kg11 is the (possibly indefinite)
+       A-matrix.  No sigma-shift or regularisation is needed.
+    6. Keep only positive μ (positive μ ↔ positive λ, i.e. buckling under
+       load amplification; negative μ would require load reversal).
+       Convert ``λ = 1/μ`` and sort ascending so the smallest load
+       multiplier comes first.
 
     Parameters
     ----------
