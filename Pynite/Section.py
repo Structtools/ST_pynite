@@ -14,7 +14,7 @@ class Section():
 
     This class stores all properties related to the geometry of the member
     """
-    def __init__(self, model: 'FEModel3D', name: str, A: float, Iy: float, Iz: float, J: float, Asy: float | None = None, Asz: float | None = None) -> None:
+    def __init__(self, model: 'FEModel3D', name: str, A: float, Iy: float, Iz: float, J: float, Asy: float, Asz: float) -> None:
         """
         :param model: The finite element model to which this section belongs
         :type model: FEModel3D
@@ -28,10 +28,10 @@ class Section():
         :type Iz: float
         :param J: The torsion constant of the section
         :type J: float
-        :param Asy: Shear area for shear in the local y-direction (bending about z). None = no shear deformation.
-        :type Asy: float, optional
-        :param Asz: Shear area for shear in the local z-direction (bending about y). None = no shear deformation.
-        :type Asz: float, optional
+        :param Asy: Shear area for shear in the local y-direction (bending about z).
+        :type Asy: float
+        :param Asz: Shear area for shear in the local z-direction (bending about y).
+        :type Asz: float
         """        
         self.model: 'FEModel3D' = model
         self.name: str = name
@@ -39,8 +39,8 @@ class Section():
         self.Iy: float = Iy
         self.Iz: float = Iz
         self.J: float = J
-        self.Asy: float | None = Asy
-        self.Asz: float | None = Asz
+        self.Asy: float = Asy
+        self.Asz: float = Asz
     
     def Phi(self, fx: float = 0, my: float = 0, mz: float = 0):
         """
@@ -88,7 +88,7 @@ class Section():
 class SteelSection(Section):
 
     def __init__(self, model: 'FEModel3D', name: str, A: float, Iy: float, Iz: float, J: float, 
-                 Zy: float, Zz: float, material_name: str) -> None:
+                 Zy: float, Zz: float, material_name: str, Asy: float = 0.0, Asz: float = 0.0) -> None:
         """
         Initialize a steel section
 
@@ -110,10 +110,14 @@ class SteelSection(Section):
         :type Zz: float
         :param material_name: Name of the material used for this section
         :type material_name: str
+        :param Asy: Shear area for shear in the local y-direction (bending about z).
+        :type Asy: float
+        :param Asz: Shear area for shear in the local z-direction (bending about y).
+        :type Asz: float
         """
 
         # Basic section properties
-        super().__init__(model, name, A, Iy, Iz, J)
+        super().__init__(model, name, A, Iy, Iz, J, Asy, Asz)
 
         # Additional section properties for steel
         self.ry: float = (Iy/A)**0.5

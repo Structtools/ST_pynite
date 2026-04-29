@@ -37,7 +37,7 @@ class Member3D():
     def __init__(self, model: FEModel3D, name: str, i_node: Node3D,
                  j_node: Node3D, material_name: str, section_name: str,
                  rotation: float = 0.0, tension_only: bool = False,
-                 comp_only: bool = False) -> None:
+                 comp_only: bool = False, beam_type: str = 'timoshenko') -> None:
         """
         Initializes a new member.
 
@@ -59,7 +59,12 @@ class Member3D():
         :type tension_only: bool, optional
         :param comp_only: Indicates if the member is compression-only, defaults to False
         :type comp_only: bool, optional
+        :param beam_type: Beam formulation: ``'timoshenko'`` (includes shear deformation) or ``'bernoulli'`` (Euler-Bernoulli). Default is ``'timoshenko'``.
+        :type beam_type: str, optional
         """
+
+        if beam_type not in ('timoshenko', 'bernoulli'):
+            raise ValueError(f"beam_type must be 'timoshenko' or 'bernoulli', got '{beam_type}'")
 
         self.name: str = name      # A unique name for the member given by the user
         self.ID: int | None = None        # Unique index number for the member assigned by the program
@@ -97,6 +102,8 @@ class Member3D():
         self.Releases: List[bool] = [False, False, False, False, False, False, False, False, False, False, False, False]
         self.tension_only: bool = tension_only  # Indicates whether the member is tension-only
         self.comp_only: bool = comp_only  # Indicates whether the member is compression-only
+        self.beam_type: str = beam_type  # 'timoshenko' or 'bernoulli'
+        self._force_timoshenko: bool = False  # Internal flag: overrides beam_type for eigenvalue analysis
 
         # Members need to track whether they are active or not for any given load combination. They may become inactive for a load combination during a tension/compression-only analysis. This dictionary will be used when the model is solved.
         self.active: Dict[str, bool] = {}  # Key = load combo name, Value = True or False
@@ -106,6 +113,12 @@ class Member3D():
 
         # Members need a link to the model they belong to
         self.model: FEModel3D = model
+
+    @property
+    def _use_timoshenko(self) -> bool:
+        """Whether to include shear deformation (Timoshenko) in stiffness calculations.
+        Returns True when beam_type is 'timoshenko' or when forced for eigenvalue analysis."""
+        return self.beam_type == 'timoshenko' or self._force_timoshenko
 
 # %%
     def L(self) -> float:
@@ -192,10 +205,14 @@ class Member3D():
         # Timoshenko shear deformation parameters
         # Phi_y corresponds to bending about the y-axis (using Iy, shear area Asz)
         # Phi_z corresponds to bending about the z-axis (using Iz, shear area Asy)
-        Asy = getattr(self.section, 'Asy', None)
-        Asz = getattr(self.section, 'Asz', None)
-        Phi_y = 12 * E * Iy / (G * Asz * L**2) if Asz else 0.0
-        Phi_z = 12 * E * Iz / (G * Asy * L**2) if Asy else 0.0
+        Asy = self.section.Asy
+        Asz = self.section.Asz
+        if self._use_timoshenko:
+            Phi_y = 12 * E * Iy / (G * Asz * L**2) if Asz else 0.0
+            Phi_z = 12 * E * Iz / (G * Asy * L**2) if Asy else 0.0
+        else:
+            Phi_y = 0.0
+            Phi_z = 0.0
 
         # Create the uncondensed local stiffness matrix (Timoshenko beam)
         k = array([[A*E/L,  0,                            0,                            0,      0,                            0,                            -A*E/L, 0,                             0,                            0,      0,                            0                            ],
@@ -779,10 +796,14 @@ class Member3D():
         Iy = self.section.Iy
         Iz = self.section.Iz
         L = self.L()
-        Asy = getattr(self.section, 'Asy', None)
-        Asz = getattr(self.section, 'Asz', None)
-        Phi_y = 12 * E * Iy / (G * Asz * L**2) if Asz else 0.0
-        Phi_z = 12 * E * Iz / (G * Asy * L**2) if Asy else 0.0
+        Asy = self.section.Asy
+        Asz = self.section.Asz
+        if self._use_timoshenko:
+            Phi_y = 12 * E * Iy / (G * Asz * L**2) if Asz else 0.0
+            Phi_z = 12 * E * Iz / (G * Asy * L**2) if Asy else 0.0
+        else:
+            Phi_y = 0.0
+            Phi_z = 0.0
 
         # Get the requested load combination
         combo = self.model.load_combos[combo_name]
@@ -2722,12 +2743,18 @@ class Member3D():
         SegmentsX = self.SegmentsX
 
         # Timoshenko shear deformation parameters
-        Asy = getattr(self.section, 'Asy', None)
-        Asz = getattr(self.section, 'Asz', None)
-        Phi_y = 12 * E * Iy / (G * Asz * L**2) if Asz else 0.0
-        Phi_z = 12 * E * Iz / (G * Asy * L**2) if Asy else 0.0
-        kAG_z = G * Asy if Asy else None  # shear rigidity for z-bending (Fy direction)
-        kAG_y = G * Asz if Asz else None  # shear rigidity for y-bending (Fz direction)
+        Asy = self.section.Asy
+        Asz = self.section.Asz
+        if self._use_timoshenko:
+            Phi_y = 12 * E * Iy / (G * Asz * L**2) if Asz else 0.0
+            Phi_z = 12 * E * Iz / (G * Asy * L**2) if Asy else 0.0
+            kAG_z = G * Asy if Asy else None  # shear rigidity for z-bending (Fy direction)
+            kAG_y = G * Asz if Asz else None  # shear rigidity for y-bending (Fz direction)
+        else:
+            Phi_y = 0.0
+            Phi_z = 0.0
+            kAG_z = None
+            kAG_y = None
 
         # Get the load combination to segment the member for
         combo = self.model.load_combos[combo_name]

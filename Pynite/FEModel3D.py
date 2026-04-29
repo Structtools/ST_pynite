@@ -299,7 +299,7 @@ class FEModel3D():
         # Return the materal name
         return name
 
-    def add_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Asy: float | None = None, Asz: float | None = None) -> str:
+    def add_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Asy: float = 0.0, Asz: float = 0.0) -> str:
         """Adds a cross-section to the model.
 
         :param name: A unique name for the cross-section.
@@ -312,10 +312,10 @@ class FEModel3D():
         :type Iz: float
         :param J: The torsion constant of the section
         :type J: float
-        :param Asy: Shear area for shear in the local y-direction (bending about z). None = no shear deformation (Euler-Bernoulli).
-        :type Asy: float, optional
-        :param Asz: Shear area for shear in the local z-direction (bending about y). None = no shear deformation (Euler-Bernoulli).
-        :type Asz: float, optional
+        :param Asy: Shear area for shear in the local y-direction (bending about z).
+        :type Asy: float
+        :param Asz: Shear area for shear in the local z-direction (bending about y).
+        :type Asz: float
         """
 
         # Name the section or check it doesn't already exist
@@ -336,7 +336,7 @@ class FEModel3D():
         # Return the section name
         return name
 
-    def add_steel_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Zy: float, Zz: float, material_name: str) -> str:
+    def add_steel_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Zy: float, Zz: float, material_name: str, Asy: float = 0.0, Asz: float = 0.0) -> str:
         """Adds a cross-section to the model.
 
         :param name: A unique name for the cross-section.
@@ -355,6 +355,10 @@ class FEModel3D():
         :type Zz: float
         :param material_name: The name of the steel material
         :type material_name: str
+        :param Asy: Shear area for shear in the local y-direction (bending about z).
+        :type Asy: float
+        :param Asz: Shear area for shear in the local z-direction (bending about y).
+        :type Asz: float
         """
 
         # Name the section or check it doesn't already exist
@@ -370,7 +374,7 @@ class FEModel3D():
                 count += 1
 
         # Add the new section to the model
-        self.sections[name] = SteelSection(self, name, A, Iy, Iz, J, Zy, Zz, material_name)
+        self.sections[name] = SteelSection(self, name, A, Iy, Iz, J, Zy, Zz, material_name, Asy, Asz)
 
         # Return the section name
         return name
@@ -428,7 +432,7 @@ class FEModel3D():
         # Return the spring name
         return name
 
-    def add_member(self, name: str, i_node: str, j_node: str, material_name: str, section_name: str, rotation: float = 0.0, tension_only: bool = False, comp_only: bool = False) -> str:
+    def add_member(self, name: str, i_node: str, j_node: str, material_name: str, section_name: str, rotation: float = 0.0, tension_only: bool = False, comp_only: bool = False, beam_type: str = 'timoshenko') -> str:
         """Adds a new physical member to the model.
 
         :param name: A unique user-defined name for the member. If ``None`` or ``""``, a name will be automatically assigned
@@ -447,6 +451,8 @@ class FEModel3D():
         :type tension_only: bool, optional
         :param comp_only: Indicates if the member is compression-only, defaults to False
         :type comp_only: bool, optional
+        :param beam_type: Beam formulation to use: ``'timoshenko'`` (includes shear deformation) or ``'bernoulli'`` (Euler-Bernoulli, no shear deformation). Default is ``'timoshenko'``.
+        :type beam_type: str, optional
         :raises NameError: Occurs if the specified name already exists.
         :return: The name of the member added to the model.
         :rtype: str
@@ -471,7 +477,7 @@ class FEModel3D():
             raise NameError(f"Node '{e.args[0]}' does not exist in the model")
 
         # Create a new member
-        new_member = PhysMember(self, name, pn_nodes[0], pn_nodes[1], material_name, section_name, rotation=rotation, tension_only=tension_only, comp_only=comp_only)
+        new_member = PhysMember(self, name, pn_nodes[0], pn_nodes[1], material_name, section_name, rotation=rotation, tension_only=tension_only, comp_only=comp_only, beam_type=beam_type)
 
         # Add the new member to the model
         self.members[name] = new_member
@@ -2568,6 +2574,17 @@ class FEModel3D():
             print('+------------------+')
             print('| Analyzing: Modal |')
             print('+------------------+')
+
+        # Force Timoshenko for all members during modal (eigenvalue) analysis
+        from Pynite.Analysis import _set_force_timoshenko
+        _set_force_timoshenko(self, True)
+
+        try:
+            return self._analyze_modal_inner(num_modes, mass_combo_name, mass_direction, gravity, log, check_stability)
+        finally:
+            _set_force_timoshenko(self, False)
+
+    def _analyze_modal_inner(self, num_modes, mass_combo_name, mass_direction, gravity, log, check_stability):
 
         # Prepare the model for analysis (same as other analysis methods)
         # This will generate the default load case ('Case 1') and load combo ('Combo 1') if none are present.

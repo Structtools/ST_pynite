@@ -149,6 +149,27 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
         If the static pre-solve or the eigenvalue solve fails.
     """
     # ------------------------------------------------------------------ #
+    # Step 0: Force Timoshenko for all members during stability analysis   #
+    # ------------------------------------------------------------------ #
+    _set_force_timoshenko(model, True)
+
+    try:
+        return _buckling_analysis_inner(model, combo_name, num_modes)
+    finally:
+        _set_force_timoshenko(model, False)
+
+
+def _set_force_timoshenko(model: FEModel3D, value: bool) -> None:
+    """Set _force_timoshenko on all sub-members (and physical members) in the model."""
+    for phys_member in model.members.values():
+        phys_member._force_timoshenko = value
+        for sub_member in phys_member.sub_members.values():
+            sub_member._force_timoshenko = value
+
+
+def _buckling_analysis_inner(model, combo_name, num_modes):
+
+    # ------------------------------------------------------------------ #
     # Step 1: Prepare model                                                #
     # ------------------------------------------------------------------ #
     _prepare_model(model)

@@ -313,7 +313,7 @@ def test_fixed_beam_reactions_timoshenko():
     model.def_support('N1', True, True, True, True, True, True)
     model.def_support('N2', True, True, True, True, True, True)
     model.add_material('Mat', _E, _G, 0.3, 0.0)
-    model.add_section('Sec', _A, _Iy, _Iz, _J, Asy=_Asy, Asz=None)
+    model.add_section('Sec', _A, _Iy, _Iz, _J, Asy=_Asy, Asz=0.0)
     model.add_member('M1', 'N1', 'N2', 'Mat', 'Sec')
     model.add_member_pt_load('M1', 'FY', P, a)
     model.add_load_combo('Combo 1', {'Case 1': 1.0})
@@ -413,7 +413,7 @@ def test_cantilever_internal_slope_timoshenko():
 # ---------------------------------------------------------------------------
 
 def test_steel_section_no_shear_areas():
-    """SteelSection does not accept Asy/Asz — documenting the API gap."""
+    """SteelSection now accepts Asy/Asz — defaults to 0.0 when not provided."""
     model = FEModel3D()
     model.add_material('Steel', _E, _G, 0.3, 7850.0)
     model.add_steel_section('IPE200', _A, _Iy, _Iz, _J,
@@ -421,9 +421,9 @@ def test_steel_section_no_shear_areas():
                             material_name='Steel')
 
     sec = model.sections['IPE200']
-    # Currently there is no way to set Asy/Asz on a SteelSection
-    assert sec.Asy is None, f'Expected Asy=None, got {sec.Asy}'
-    assert sec.Asz is None, f'Expected Asz=None, got {sec.Asz}'
+    # When Asy/Asz are not explicitly provided, they default to 0.0
+    assert sec.Asy == 0.0, f'Expected Asy=0.0, got {sec.Asy}'
+    assert sec.Asz == 0.0, f'Expected Asz=0.0, got {sec.Asz}'
 
 
 # ---------------------------------------------------------------------------
