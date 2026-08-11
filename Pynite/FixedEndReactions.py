@@ -27,7 +27,16 @@ def _solve_FER_bending(I1: float, I2: float, L: float, Phi: float, total_load: f
     I1 : float
         integral of load(s) * b(s)^2 / 2 ds  (b = L - s)
     I2 : float
-        integral of load(s) * (b(s)^3/6 + Phi*L^2*b(s)/12) ds
+        integral_0^L (L - x) * Q(x) dx  -  (Phi*L^2/12) * S
+
+        where Q(x) is the moment at x of the applied loads to the left of x,
+        and S is the *shear impulse* of the applied loading:
+            S = Q(L)  for transverse loads (point loads, distributed loads)
+            S = 0     for applied couples
+
+        The distinction matters. A concentrated couple makes M(x) jump but
+        leaves V(x) continuous, so it contributes nothing to the shear
+        compatibility integral and therefore carries no Phi term at all.
     L : float
         Member length
     Phi : float
@@ -41,13 +50,22 @@ def _solve_FER_bending(I1: float, I2: float, L: float, Phi: float, total_load: f
     """
     FER = zeros((12, 1))
 
+    # The compatibility conditions are written in the (L - x)-weighted form,
+    # which flips the sign of every Phi term relative to the x-weighted
+    # derivation. Hence (2 - Phi) and (1 + Phi), not (2 + Phi) and (Phi - 1).
+    #
     # Determinant of the 2x2 system:
-    # | L       L^2/2                  | | M_0 |   | I1 |
-    # | L^2/2   L^3*(2+Phi)/12        | | R_i | = | I2 |
-    det = L**4 * (Phi - 1) / 12
+    # | L       L^2/2            | | M_0 |   | I1 |
+    # | L^2/2   L^3*(2-Phi)/12   | | R_i | = | I2 |
+    #
+    # det = -L^4*(1 + Phi)/12 never vanishes for Phi >= 0. Every correct
+    # Timoshenko quantity carries (1 + Phi); a (Phi - 1) denominator here
+    # would introduce a spurious pole at Phi = 1 (L/h ~ 1.77 for a
+    # rectangular section with nu = 0.3, i.e. entirely reachable).
+    det = -L**4 * (1 + Phi) / 12
 
     # Cramer's rule
-    M_0 = (I1 * L**3 * (2 + Phi) / 12 - L**2 / 2 * I2) / det
+    M_0 = (I1 * L**3 * (2 - Phi) / 12 - L**2 / 2 * I2) / det
     R_i = (L * I2 - L**2 / 2 * I1) / det
 
     R_j = total_load - R_i
@@ -107,9 +125,10 @@ def FER_PtLoad(P: float, x: float, L: float, Direction: Literal["Fy", "Fz"], Phi
     """
     b = L - x
 
-    # Integrals for point load P at position x: b(s) = L - s evaluated at s = x
+    # Integrals for point load P at position x: b(s) = L - s evaluated at s = x.
+    # Shear impulse S = P*b, giving the -(Phi*L^2/12)*S term below.
     I1 = P * b**2 / 2
-    I2 = P * (b**3 / 6 + Phi * L**2 * b / 12)
+    I2 = P * (b**3 / 6 - Phi * L**2 * b / 12)
     total_load = P
     total_moment_about_i = P * x
 
@@ -137,12 +156,15 @@ def FER_Moment(M: float, x: float, L: float, Direction: Literal["My", "Mz"], Phi
     """
     b = L - x
 
-    # For an applied moment M at position x on a fixed-fixed Timoshenko beam:
-    # The compatibility equations have RHS: [-M*b, -M*b^2/2] for the EB terms
-    # plus the Timoshenko correction.
-    # Following the same derivation as for point loads:
+    # For an applied moment M at position x on a fixed-fixed Timoshenko beam.
+    #
+    # There is NO Phi term here. A concentrated couple makes the bending
+    # moment M(x) jump but leaves the shear V(x) continuous, so its shear
+    # impulse S is zero and it drops out of the shear compatibility integral.
+    # The Phi dependence of the result enters solely through the (1 + Phi)
+    # and (2 - Phi) factors in _solve_FER_bending.
     I1 = -M * b
-    I2 = -M * (b**2 / 2 + Phi * L**2 / 12)
+    I2 = -M * b**2 / 2
     total_load = 0.0
     total_moment_about_i = M
 
@@ -193,7 +215,9 @@ def FER_LinLoad(w1: float, w2: float, x1: float, x2: float, L: float, Direction:
           + c*b1**3*dx**2/2 - c*b1**2*dx**3 + 3*c*b1*dx**4/4 - c*dx**5/5)
 
     I1 = J2 / 2
-    I2 = J3 / 6 + Phi * L**2 / 12 * J1
+    # Shear impulse S = J1 (the total load moment arm integral), so the
+    # Timoshenko term is subtracted, matching FER_PtLoad.
+    I2 = J3 / 6 - Phi * L**2 / 12 * J1
 
     # Total load and moment about i-end
     total_load = dx * (w1 + w2) / 2
