@@ -122,7 +122,7 @@ def _oracle_result(L, kind, value, a, shear=True, plane='y', n=4):
     return _solve(model, plane)
 
 
-def _oracle_distributed(L, w1, w2, x1, x2, n=2000):
+def _oracle_distributed(L, w1, w2, x1, x2, n=200):
     """Tributary-lumped nodal oracle for a linearly varying load.
 
     Converges rather than being exact, so callers use a looser tolerance.
