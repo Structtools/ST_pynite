@@ -271,7 +271,20 @@ class FEModel3D():
         :type G: float
         :param nu: Poisson's ratio of the material.
         :type nu: float
-        :param rho: The density of the material
+        :param rho: The density of the material. Note that `add_member_self_weight` computes the
+                    self-weight load as `rho*A` and reads the result as a force per unit length, so
+                    `rho` is a *weight* density rather than a mass density. With base units of kN
+                    and m that makes steel roughly 78.5, not 7.85, and the mass that modal analysis
+                    derives from it comes out in kN·s²/m, which is a tonne.
+
+                    **The sign of `rho` is ignored when mass is assembled.** Only its magnitude is
+                    used, in all three mass paths: self-mass, load-derived point mass and
+                    load-derived distributed mass. A negative weight density is therefore a
+                    supported way to express the direction of self-weight -- `rho = -78.5` with
+                    `add_member_self_weight(direction, factor=1.0)` carries exactly the same mass,
+                    and yields exactly the same frequencies, as `rho = +78.5` with `factor=-1.0`.
+                    Mass is not a signed quantity, so neither convention can produce a negative
+                    element mass.
         :type rho: float
         :return: The name of the material added to the model.
         :rtype: str
@@ -2662,7 +2675,7 @@ class FEModel3D():
                       into the results -- which for many floors are the modes that actually govern,
                       appearing here interleaved with the in-plane ones. As with subdivision, the
                       restraints are applied to an internal copy and the caller's model is
-                      untouched.
+                      untouched, whatever arguments are given.
         :type plane: str, optional
         :param linear_state: Required declaration of which linear state to take the modes of when
                              the model contains tension-only or compression-only members, whose
@@ -2704,20 +2717,18 @@ class FEModel3D():
         # Refuse to guess at a state the model does not define (see `_check_linear_state`)
         self._check_linear_state(linear_state)
 
-        # Work on a copy of the model whenever the analysis needs to change it, so that the
-        # caller's model and their static results are left exactly as they were
-        if elements_per_member > 1 or plane is not None:
+        if log and elements_per_member > 1:
+            print(f'- Subdividing members into {elements_per_member} elements for analysis')
 
-            if log and elements_per_member > 1:
-                print(f'- Subdividing members into {elements_per_member} elements for analysis')
+        if log and plane is not None:
+            print(f'- Restraining out-of-plane DOFs for a {plane}-plane analysis')
 
-            if log and plane is not None:
-                print(f'- Restraining out-of-plane DOFs for a {plane}-plane analysis')
-
-            model = self._modal_mesh_copy(elements_per_member, plane)
-
-        else:
-            model = self
+        # Always work on a copy, even when there is nothing to subdivide or restrain. Solving on the
+        # caller's own model would be enough to destroy their static results, because preparing a
+        # model for analysis clears every stored nodal displacement. Making the copy unconditional
+        # makes the isolation guarantee unconditional too, rather than something that happens to hold
+        # for most argument combinations.
+        model = self._modal_mesh_copy(elements_per_member, plane)
 
         # Force Timoshenko for all members during modal (eigenvalue) analysis
         from Pynite.Analysis import _set_force_timoshenko
@@ -2726,13 +2737,12 @@ class FEModel3D():
         try:
             results = model._analyze_modal_inner(num_modes, mass_combo_name, mass_direction,
                                                  gravity, log, check_stability, mass_formulation,
-                                                 elements_per_member)
+                                                 elements_per_member, plane, linear_state)
         finally:
             _set_force_timoshenko(model, False)
 
         # Bring the results back onto the model the caller actually holds
-        if model is not self:
-            self._adopt_modal_results(model, results)
+        self._adopt_modal_results(model, results)
 
         return results
 
@@ -2922,7 +2932,8 @@ class FEModel3D():
         self.solution = 'Modal'
 
     def _analyze_modal_inner(self, num_modes, mass_combo_name, mass_direction, gravity, log,
-                             check_stability, mass_formulation, elements_per_member) -> ModalResults:
+                             check_stability, mass_formulation, elements_per_member, plane,
+                             linear_state) -> ModalResults:
 
         # Prepare the model for analysis (same as other analysis methods)
         # This will generate the default load case ('Case 1') and load combo ('Combo 1') if none are present.
@@ -3020,8 +3031,14 @@ class FEModel3D():
             converged_modes=int(frequencies.size),
             solver=solver,
             sigma=sigma,
+            mass_combo_name=mass_combo_name,
+            mass_direction=mass_direction,
+            gravity=gravity,
             mass_formulation=mass_formulation,
             elements_per_member=elements_per_member,
+            plane=plane,
+            linear_state=linear_state,
+            shear_deformation=self._has_shear_areas(),
             stabilized_dof_count=int(np.size(stabilized)),
             filtered_modes=filtered,
         )
@@ -3035,6 +3052,7 @@ class FEModel3D():
             dof_map=self._dof_map(D1_indices),
             M=M_global,
             total_mass=self._total_mass(M_global),
+            participating_mass=self._total_mass(M_global, D1_indices),
             mass_per_node=self._mass_per_node(M_global),
             mesh_nodes={name: (node.X, node.Y, node.Z) for name, node in self.nodes.items()},
             diagnostics=diagnostics,
@@ -3237,6 +3255,25 @@ class FEModel3D():
 
         return eigenvalues[keep], eigenvectors[:, keep], filtered
 
+    def _has_shear_areas(self) -> bool:
+        """Returns whether any member's section defines a shear area.
+
+        Modal analysis forces the Timoshenko formulation on, but the shear correction term is
+        skipped for a section whose shear area is zero, and zero is what `add_section` defaults to.
+        A model built without shear areas is therefore solved as Euler-Bernoulli despite the
+        forcing. Reporting this keeps the distinction visible, and warns of the day supplying shear
+        areas for some unrelated reason moves every modal frequency.
+
+        :return: Whether shear deformation is actually active anywhere in the model
+        :rtype: bool
+        """
+
+        for member in self.members.values():
+            if member.section.Asy or member.section.Asz:
+                return True
+
+        return False
+
     def _dof_map(self, D1_indices) -> List[Tuple[str, str]]:
         """Returns the `(node_name, dof)` pair for each free DOF, in solver order.
 
@@ -3263,19 +3300,31 @@ class FEModel3D():
 
         return [(by_id[dof//6].X, by_id[dof//6].Y, by_id[dof//6].Z, dof % 6) for dof in D1_indices]
 
-    def _total_mass(self, M_global) -> Dict[str, float]:
-        """Returns the total assembled mass in each global direction.
+    def _total_mass(self, M_global, free_dofs=None) -> Dict[str, float]:
+        """Returns the assembled mass in each global direction.
 
         A mass matrix's diagonal does not sum to the total mass once the formulation is consistent,
         because mass is shared between coupled DOFs. The total is `rᵀMr` for a rigid unit
         translation `r`, which is the mass the structure would present to a uniform acceleration.
 
+        Restricting to the free DOFs gives the *participating* mass instead: the mass that modes can
+        actually mobilize. Mass on a restrained DOF is held by the support and never appears in any
+        mode, so effective modal mass accumulates towards this rather than towards the total.
+
         :param M_global: The assembled global mass matrix.
-        :return: The total mass, keyed by direction
+        :param free_dofs: Restrict the sum to these DOFs. Pass the free-DOF indices for the
+                          participating mass, or `None` for the total.
+        :return: The mass, keyed by direction
         :rtype: Dict[str, float]
         """
 
         totals = {}
+
+        # Partition down to the free DOFs once, rather than per direction
+        if free_dofs is None:
+            M = M_global
+        else:
+            M = M_global[free_dofs][:, free_dofs]
 
         for offset, direction in enumerate('XYZ'):
 
@@ -3283,7 +3332,10 @@ class FEModel3D():
             r = np.zeros(M_global.shape[0])
             r[offset::6] = 1.0
 
-            totals[direction] = float(r @ (M_global @ r))
+            if free_dofs is not None:
+                r = r[free_dofs]
+
+            totals[direction] = float(r @ (M @ r))
 
         return totals
 

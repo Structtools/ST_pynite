@@ -74,8 +74,20 @@ Return value
 
 A ``ModalResults`` object exposing ``frequencies`` (Hz), ``omega``, ``periods``,
 ``eigenvalues``, the mass-normalized ``mode_shapes`` with their ``free_dof_indices`` and
-``dof_map``, the assembled mass matrix ``M``, ``total_mass`` and ``mass_per_node`` for
-sanity-checking, ``mesh_nodes``, and ``diagnostics``.
+``dof_map``, the assembled mass matrix ``M``, ``total_mass``, ``participating_mass`` and
+``mass_per_node`` for sanity-checking, ``mesh_nodes``, and ``diagnostics``.
+
+It also provides ``participation_factors(direction)``, ``effective_mass(direction)`` and
+``mass_participation(direction)``, which answer "which mode actually matters in this direction?"
+without the caller having to partition the mass matrix themselves.
+
+.. important::
+
+   ``mass_participation`` divides by ``participating_mass``, not ``total_mass``. Mass held on a
+   restrained degree of freedom cannot move in any mode, so no number of modes will recover it and
+   effective modal mass accumulates towards the participating mass. Dividing by the total instead
+   makes participation look permanently incomplete. For a planar analysis, ``participating_mass``
+   out of plane is exactly zero while ``total_mass`` in that direction is unchanged.
 
 Units
 =====
@@ -97,13 +109,23 @@ most incorrect modal results.
    ``78.5`` (kN/m³) rather than ``7.85`` (t/m³), and the assembled mass comes out in kN·s²/m,
    which is a tonne. Masses passed to ``add_node_mass()`` are in those mass units.
 
+.. note::
+
+   The **sign** of ``rho`` is ignored when mass is assembled; only its magnitude is used. A negative
+   weight density is therefore a supported way to express the direction of self-weight, and
+   ``rho = -78.5`` with ``factor = 1.0`` gives exactly the same frequencies as ``rho = +78.5`` with
+   ``factor = -1.0``. Mass is not a signed quantity, so neither convention can produce a negative
+   element mass.
+
 Mass sources
 ============
 
 Three sources add up, and none double-counts another:
 
 - **Self-mass** from material density. Requires both a self-weight load and that load's case
-  in the mass combination — density alone produces no mass.
+  in the mass combination — density alone produces no mass. The factor given to
+  ``add_member_self_weight`` scales the mass as well as the load, so raising it to account for
+  connections raises the dynamic mass too.
 - **Load-derived mass** from the mass combination, converted as ``load / gravity``. Mass is
   sign-insensitive, and distributed loads are integrated over their loaded length rather than
   lumped at an estimated centroid, so the assembled total is exact.
@@ -124,6 +146,12 @@ Requirements and notes
 - ``total_mass`` is ``rᵀMr`` for a rigid unit translation, not the sum of the matrix diagonal.
   A consistent mass matrix shares mass between coupled DOFs, so its diagonal sums to only
   312/420 of the true total in the transverse directions.
+- The analysis always runs on an internal copy of the model, whatever arguments are given, so the
+  caller's geometry, supports and static results survive a modal run untouched.
+- Modal analysis forces the Timoshenko formulation on, but the shear correction is skipped for a
+  section whose shear area is zero, which is what ``add_section`` defaults to. A model built without
+  shear areas is solved as Euler–Bernoulli despite the forcing;
+  ``results.diagnostics.shear_deformation`` reports which one was actually used.
 
 Errors
 ======

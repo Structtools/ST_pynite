@@ -405,6 +405,23 @@ class Member3D():
         return load_mass + material_mass
 
     def consistent_m(self, mass_combo_name, gravity: float = 1.0) -> NDArray[float64]:
+        """Returns the consistent mass matrix for the member's self-mass in local coordinates.
+
+        Self-mass is built from the self-weight loads in the mass combination rather than from the
+        material density alone, so a member whose self-weight is not in the mass combination
+        contributes no self-mass even if its material has a density.
+
+        Only the *magnitude* of the density matters. A negative `rho` is a legitimate way to express
+        a downward self-weight load, and it carries the same mass as the equivalent positive density
+        with a negative load factor. See `add_material` for the full sign contract.
+
+        :param mass_combo_name: Load combination name defining which self-weight loads count.
+        :type mass_combo_name: str
+        :param gravity: The acceleration due to gravity. Defaults to 1.0.
+        :type gravity: float, optional
+        :return: The member's self-mass matrix in local coordinates
+        :rtype: NDArray[float64]
+        """
 
         # Get the section properties needed to form the local mass matrix
         J = self.section.J
@@ -429,9 +446,17 @@ class Member3D():
                 # Find the load factor the user has specified for this load
                 factor = mass_combo.factors[case]
 
-                # Calculate the factored mass
-                rho = self.material.rho
-                material_mass += factor*rho*L*A/gravity
+                # Calculate the factored mass from the load itself rather than recomputing it from
+                # the density. The load already carries `rho*A` times whatever factor was given to
+                # `add_member_self_weight`, so reading it back here picks that factor up: a member
+                # whose self-weight was raised by 15% to account for connections carries 15% more
+                # mass, instead of the extra weight showing up statically but not dynamically.
+                #
+                # The magnitude is taken per contribution rather than after summation. Mass is not a
+                # signed quantity, and the sign here carries only the direction of the self-weight
+                # load, so accumulating signed values would let two self-weight cases of opposing
+                # sign cancel and understate the self-mass.
+                material_mass += abs(factor*(w1 + w2)/2*(x2 - x1)/gravity)
 
         # Consistent mass matrix for 3D beam element
         #   [dxi     dyi     dzi      rxi      ryi      rzi      dxj  dyj     dzj    rxj      ryj      rzj   ]
@@ -461,7 +486,8 @@ class Member3D():
         # print(f"DEBUG: Expected sum for 2 nodes = 420")
         # print(f"DEBUG: Ratio = {trans_coeff_sum/420:.3f}")
 
-        m = m_coeff*(abs(material_mass)/420)
+        # `material_mass` is already non-negative, having been accumulated as magnitudes above
+        m = m_coeff*(material_mass/420)
 
         return m
 

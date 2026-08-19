@@ -37,6 +37,25 @@ Mass then comes out in kN·s²/m, which is a **tonne**. Nodal masses you supply 
 A factor-of-1000 slip in density moves every frequency by √1000 ≈ 31.6×, so it is worth a sanity
 check on every run. `results.total_mass` and `results.mass_per_node` exist for exactly that.
 
+### The sign of `rho` is ignored
+
+Only the magnitude of the density is used when mass is assembled — in all three mass paths. A
+**negative weight density is a supported way to express the direction of self-weight**, which is
+convenient in a Z-up model:
+
+```python
+# These two are equivalent, in both the static load and the modal mass
+model.add_material('Steel', E, G, nu, rho=-78.5)   # sign in the density
+model.add_member_self_weight('FZ', 1.0, 'D')
+
+model.add_material('Steel', E, G, nu, rho=+78.5)   # sign in the factor
+model.add_member_self_weight('FZ', -1.0, 'D')
+```
+
+Mass is not a signed quantity, so neither convention can produce a negative element mass or an
+indefinite mass matrix. This is a contract, not an implementation detail —
+`test_density_sign_is_ignored_when_assembling_mass` pins it.
+
 ---
 
 ## Quick start
@@ -85,6 +104,16 @@ model.add_load_combo('Mass', {'D': 1.0})          # brings it into the mass comb
 
 Self-mass always uses the consistent mass matrix, regardless of `mass_formulation`.
 
+The factor scales the mass as well as the load, so raising it to account for connections raises the
+dynamic mass too:
+
+```python
+model.add_member_self_weight('FY', -1.15, 'D')     # 15% for connections -> 15% more mass
+```
+
+Both load factors compound: the one given to `add_member_self_weight` and the one the mass
+combination applies to its case.
+
 ### 2. Load-derived mass, from a mass combination
 
 Any non-self-weight load in the mass combination is converted to mass as `load / gravity`. This is
@@ -98,6 +127,13 @@ model.add_load_combo('Mass', {'D': 1.0, 'Q': 0.3})    # G + 0.3Q
 Mass is sign-insensitive — an upward load carries mass just as a downward one does — and is applied
 to **all three** translational directions, so sway modes of frames are captured. `mass_direction`
 selects only which *component* of each load is measured, not which DOFs receive it.
+
+**Load components in other directions are dropped, deliberately.** With `mass_direction='Z'` in a
+Z-up model, a purely horizontal `FX` load contributes no mass at all. That is correct for mass
+derived from gravity, which is the intended use: a horizontal load is wind or notional force, not
+weight, and converting it to mass would invent mass that does not exist. If you have mass that is
+genuinely not expressed as a gravity load, apply it with `add_node_mass()` instead of relying on the
+conversion.
 
 Distributed loads are integrated over their loaded length rather than lumped at an estimated
 centroid, so the assembled total equals the applied mass exactly.
@@ -144,42 +180,59 @@ results.free_dof_indices # global DOF index for each row of mode_shapes
 results.dof_map          # [('N1', 'DY'), ...] one entry per row of mode_shapes
 results.mode_shape(1)    # {('N1', 'DY'): 0.0123, ...} for mode 1
 
-results.M                # the assembled global mass matrix (sparse)
-results.total_mass       # {'X': ..., 'Y': ..., 'Z': ...}
-results.mass_per_node    # {node_name: mass}
-results.mesh_nodes       # {node_name: (X, Y, Z)} including subdivision nodes
+results.M                  # the assembled global mass matrix (sparse)
+results.total_mass         # {'X': ..., 'Y': ..., 'Z': ...} everything assembled
+results.participating_mass # {'X': ..., 'Y': ..., 'Z': ...} only what modes can mobilize
+results.mass_per_node      # {node_name: mass}
+results.mesh_nodes         # {node_name: (X, Y, Z)} including subdivision nodes
 results.diagnostics
+
+results.participation_factors('Z')   # per-mode gamma
+results.effective_mass('Z')          # per-mode effective modal mass
+results.mass_participation('Z')      # per-mode fraction of the participating mass
 ```
 
-Mode shapes are mass-normalized (`φᵀMφ = I`), which is what makes the standard post-processing a
-one-liner. For participation factors and effective modal mass with influence vector `r`:
+### Which mode actually matters
+
+"The frequency of the beam" is the lowest mode with significant effective mass in the direction you
+care about — **not necessarily mode 1**. A simply supported beam's antisymmetric modes have
+effective mass of essentially zero, so mode 2 is invisible to a uniform vertical excitation.
 
 ```python
 import numpy as np
 
-M11 = results.M.toarray()[np.ix_(results.free_dof_indices, results.free_dof_indices)]
+participation = results.mass_participation('Y')          # fraction per mode
+cumulative = np.cumsum(participation)
 
-r = np.zeros(results.M.shape[0])
-r[1::6] = 1.0                            # rigid unit translation in Y
-r11 = r[results.free_dof_indices]
+governing = int(np.argmax(participation > 0.05))         # first mode that carries real mass
+print(f'Governing: mode {governing + 1} at {results.frequencies[governing]:.2f} Hz '
+      f'({100*participation[governing]:.0f}% of participating mass)')
 
-# Generalized mass is 1, so the participation factor is just this product
-gamma = results.mode_shapes.T @ (M11 @ r11)
-effective_mass = gamma**2
-participating = float(r11 @ (M11 @ r11))
-
-print(effective_mass/participating)                  # fraction per mode
-print(np.cumsum(effective_mass)/participating)       # cumulative
+if cumulative[-1] < 0.90:
+    print(f'Only {100*cumulative[-1]:.0f}% of mass captured — request more modes')
 ```
 
-Note the denominator: mass sitting on a **restrained** DOF can never participate in any mode, so
-`sum(effective_mass)` converges on the free-DOF mass `r11ᵀM11r11`, which is below
-`total_mass['Y']`. Dividing by the total instead will make participation look permanently
-incomplete.
+`participation_factors(direction)` and `effective_mass(direction)` give the unnormalized quantities
+if you need them. Mode shapes are mass-normalized (`φᵀMφ = I`), so the generalized mass in the
+denominator of the usual formulae is one:
 
-"The frequency of the beam" is the lowest mode with significant effective mass in the direction you
-care about — not necessarily mode 1. A simply supported beam's antisymmetric modes have effective
-mass of essentially zero.
+- `Γᵢ = φᵢᵀ M r` — `participation_factors()`
+- `m_eff,i = Γᵢ²` — `effective_mass()`
+- `m_eff,i / participating_mass` — `mass_participation()`
+
+### Why `participating_mass` and not `total_mass`
+
+`mass_participation()` divides by `participating_mass`, and that distinction is the one thing here
+worth reading twice. Mass sitting on a **restrained** DOF can never move in any mode, so no number
+of modes will recover it. Effective modal mass therefore accumulates towards
+`participating_mass[direction]`, not `total_mass[direction]`.
+
+Divide by the total instead and participation looks permanently incomplete — for the beam in the
+quick start above, capped around 84% no matter how many modes you compute. A planar analysis makes
+this stark: `participating_mass` out of plane is exactly `0.0`, because every out-of-plane DOF is
+restrained, while `total_mass` in that direction is unchanged.
+
+Both are exposed so you never have to rebuild `M11` by index-slicing to find out.
 
 ---
 
@@ -208,10 +261,15 @@ results = model.analyze_modal(..., elements_per_member=16)   # more accuracy
 results = model.analyze_modal(..., elements_per_member=1)    # no subdivision
 ```
 
-**Your model is never modified.** Subdivision happens on an internal copy, so your geometry,
-supports and static results all survive a modal run untouched. The subdivision nodes appear in
-`results.dof_map` and `results.mesh_nodes` — named `_modal_<member>_<n>` — but never in
-`model.nodes`.
+**Your model is never modified, whatever arguments you pass.** The analysis always runs on an
+internal copy — even with `elements_per_member=1` and no `plane`, where there is nothing to subdivide
+or restrain — so your geometry, supports and static results all survive a modal run untouched. The
+guarantee is unconditional rather than something that holds for most argument combinations, because
+preparing a model for analysis clears every stored nodal displacement, and a copy skipped as an
+optimisation would erase your static results with no error raised.
+
+The subdivision nodes appear in `results.dof_map` and `results.mesh_nodes` — named
+`_modal_<member>_<n>` — but never in `model.nodes`.
 
 ---
 
@@ -266,16 +324,51 @@ material for documenting an analysis assumption:
 
 ```python
 d = results.diagnostics
-d.requested_modes         # what you asked for
-d.converged_modes         # what you got
+
+# What was asked for, and what came back
+d.requested_modes
+d.converged_modes
 d.truncated               # True if fewer converged than requested
 d.solver                  # 'sparse-shift-invert' or 'dense'
 d.sigma                   # the shift used
 d.filtered_modes          # [(index, reason), ...] eigenpairs discarded as artifacts
+d.stabilized_dof_count    # massless DOFs given a negligible mass to stay solvable
+
+# Every argument that changes the answer, echoed back
+d.mass_combo_name
+d.mass_direction
+d.gravity                 # read this one back; the 1.0 default is the classic silent error
 d.mass_formulation
 d.elements_per_member
-d.stabilized_dof_count    # massless DOFs given a negligible mass to stay solvable
+d.plane
+d.linear_state
+d.shear_deformation       # whether forced Timoshenko actually did anything
+
 d.summary()               # one-line human-readable version
+```
+
+The provenance fields exist so a result is self-describing, which matters in two places. **Cache
+keys** can be derived from the result rather than re-threaded from the request, so they cannot drift
+out of step with what they describe. **Analysis documentation** needs the mass basis, gravity,
+analysis plane and linear-state declaration stated, and `summary()` renders all of it in one line:
+
+```
+6 of 6 modes, sparse-shift-invert solver, mass from 'Mass' (Y) at g=9.81, consistent mass,
+8 element(s) per member, Euler-Bernoulli, XY plane
+```
+
+### `shear_deformation`: forced Timoshenko can be a no-op
+
+Modal analysis forces the Timoshenko formulation on for every member, but the shear correction is
+skipped when a section's shear area is zero — and `add_section` defaults both shear areas to zero.
+**A model built without shear areas is solved as Euler–Bernoulli despite the forcing.**
+
+`diagnostics.shear_deformation` reports which one you actually got. It is worth checking, because the
+day you supply `Asy`/`Asz` for some unrelated reason, every modal frequency will change with no
+change in the modal code:
+
+```python
+model.add_section('IPE200', A, Iy, Iz, J, Asy=0.0014, Asz=0.0019)   # now Timoshenko for real
 ```
 
 Fewer modes than requested are reported honestly rather than padded, so **check `truncated`**. Modes
@@ -351,6 +444,12 @@ implemented.
   frequency that came from a mass combination should be recomputed.**
 - Loads applied in member-local directions (`'Fx'`, `'Fy'`, `'Fz'`) raised a `TypeError` when
   converted to mass. They now work.
+- The factor given to `add_member_self_weight()` was ignored when assembling mass, so a member whose
+  self-weight had been raised to account for connections carried the unfactored mass. It now scales
+  the mass as it always scaled the load. **Models using a self-weight factor other than ±1 will
+  report lower frequencies than before, correctly.**
+- Self-mass contributions are accumulated as magnitudes rather than signed values, so two
+  self-weight cases of opposing sign now add instead of cancelling.
 - `Mode n` combinations are tagged `'modal'`. Filter on that tag to keep them out of envelopes and
   reports:
 

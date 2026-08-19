@@ -564,75 +564,6 @@ def test_rayleigh_quotient_returns_the_eigenvalues():
     assert np.allclose(np.sqrt(quotient)/(2*np.pi), results.frequencies, rtol=1e-8)
 
 
-def test_effective_modal_mass_sums_to_the_participating_mass():
-    """Effective modal mass summed over *every* mode must equal the participating mass exactly.
-
-    This is the completeness identity the caller's participation-factor post-processing rests on:
-    the mode shapes span the free DOFs, so `sum(Gamma_i**2) == r.T @ M11 @ r`. Note that the target
-    is the mass on the free DOFs, not the total assembled mass -- mass sitting on a restrained DOF
-    cannot participate in any mode, and no number of modes will recover it.
-
-    A small model is used so that every mode can be solved for, which is what makes the identity
-    exact rather than approximate.
-    """
-
-    model = beam_model('simply supported')
-    results = modal(model, num_modes=400, elements_per_member=2)
-
-    M = results.M.toarray()
-    free = results.free_dof_indices
-    M11 = M[np.ix_(free, free)]
-
-    # Influence vector for a rigid unit translation in Y, restricted to the free DOFs
-    r = np.zeros(M.shape[0])
-    r[1::6] = 1.0
-    r11 = r[free]
-
-    # The mode shapes are mass-normalized, so the generalized mass is one and the effective modal
-    # mass is just the square of the participation factor
-    effective = np.array([(phi @ (M11 @ r11))**2 for phi in results.mode_shapes.T])
-
-    participating = float(r11 @ (M11 @ r11))
-
-    # Every mode was solved for, so the sum is the whole participating mass
-    assert results.mode_count == len(free)
-    assert effective.sum() == pytest.approx(participating, rel=1e-9)
-
-    # Mass on the restrained DOFs is unreachable, so this stays below the total
-    assert participating < results.total_mass['Y']
-
-
-def test_effective_modal_mass_is_dominated_by_the_fundamental_mode():
-    """A simply supported beam's fundamental mode must carry the bulk of the mass.
-
-    The antisymmetric modes carry none of it, which is why "the frequency of the beam" is the lowest
-    mode with significant effective mass in the direction of interest rather than simply mode 1.
-    """
-
-    results = modal(beam_model('simply supported'), num_modes=6)
-
-    M = results.M.toarray()
-    free = results.free_dof_indices
-    M11 = M[np.ix_(free, free)]
-
-    r = np.zeros(M.shape[0])
-    r[1::6] = 1.0
-    r11 = r[free]
-
-    effective = np.array([(phi @ (M11 @ r11))**2 for phi in results.mode_shapes.T])
-    fractions = effective/results.total_mass['Y']
-
-    # The fundamental mode dominates, approaching the continuum value of 8/pi**2
-    assert 0.70 < fractions[0] < 8/np.pi**2
-
-    # The second bending mode is antisymmetric and participates in nothing
-    assert fractions[1] < 1e-6
-
-    # Accumulating modes can only add mass, never exceed the total
-    assert np.all(np.diff(np.cumsum(effective)) >= 0)
-    assert np.cumsum(effective)[-1] <= results.total_mass['Y']*(1 + 1e-9)
-
-
 # ---------------------------------------------------------------------------------------------
 # Determinism
 # ---------------------------------------------------------------------------------------------
@@ -1024,20 +955,433 @@ def test_diagnostics_report_what_the_solver_did():
 def test_planar_analysis_excludes_out_of_plane_modes():
     """Declaring a plane must keep lateral and torsional modes out of the results.
 
-    Subdivision creates interior nodes the caller cannot restrain, and leaving them free out of
-    plane lets lateral modes into the answer interleaved with the in-plane ones. With `Iy == Iz`
-    here, the lateral modes land on the same frequencies as the in-plane ones, so a 3D run returns
-    each frequency twice.
+    A cantilever with `Iy == Iz` has identical boundary conditions in both bending planes, so every
+    bending mode is a degenerate pair. In three dimensions both halves of each pair come back and
+    half the requested modes are spent on the lateral one; in plane, the same request buys four
+    distinct in-plane modes.
     """
 
-    planar = modal(beam_model('simply supported'), num_modes=4).frequencies
+    planar = modal(beam_model('cantilever'), num_modes=4).frequencies
 
-    spatial = beam_model('simply supported').analyze_modal(
+    spatial = beam_model('cantilever').analyze_modal(
         num_modes=4, mass_combo_name='Mass', gravity=GRAVITY
     ).frequencies
 
-    # In plane, the four lowest modes are four distinct bending modes
+    # In plane, the four lowest modes are four distinct modes
     assert len(set(np.round(planar, 6))) == 4
 
-    # In three dimensions they come in pairs, so the same four slots hold only two frequencies
+    # In three dimensions they come in degenerate pairs, so the same four slots hold fewer
     assert len(set(np.round(spatial, 6))) < 4
+
+
+def test_out_of_plane_modes_interleave_with_the_in_plane_ones():
+    """Lateral modes are not merely extra, they land *between* the in-plane modes.
+
+    This is what makes them a correctness problem rather than a nuisance: mode 2 of a
+    three-dimensional run of a laterally braced beam is a lateral mode, so anything that reads "the
+    second mode" gets an answer about the wrong plane. The interior nodes that subdivision creates
+    are the ones left free here, which is why the caller cannot fix this from outside.
+    """
+
+    braced = beam_model('simply supported', brace_out_of_plane=True)
+    planar = modal(braced, num_modes=4).frequencies
+
+    spatial = beam_model('simply supported', brace_out_of_plane=True).analyze_modal(
+        num_modes=4, mass_combo_name='Mass', gravity=GRAVITY
+    ).frequencies
+
+    # Both runs agree on the fundamental, which is an in-plane mode either way
+    assert spatial[0] == pytest.approx(planar[0], rel=1e-6)
+
+    # But the second mode of the 3D run is a lateral mode that the planar run never reports
+    assert spatial[1] < planar[1]
+    assert not np.any(np.isclose(planar, spatial[1], rtol=1e-6))
+
+
+# ---------------------------------------------------------------------------------------------
+# Sign conventions for self-weight
+# ---------------------------------------------------------------------------------------------
+
+def test_density_sign_is_ignored_when_assembling_mass():
+    """A negative weight density must carry exactly the same mass as a positive one.
+
+    There are two ways to express the direction of self-weight: a negative density with a positive
+    load factor, or a positive density with a negative load factor. Both reach the same load, and
+    both must reach the same mass, because mass is not a signed quantity. Downstream code relies on
+    this to keep one self-weight convention across static and modal analysis, so it is a contract
+    rather than an implementation detail -- a refactor that concluded "density is positive, drop the
+    `abs`" would produce negative element masses and an indefinite mass matrix.
+    """
+
+    def run(rho, self_weight_factor):
+        model = beam_model('simply supported', self_weight=False)
+        model.materials['Steel'].rho = rho
+        model.add_member_self_weight('FY', self_weight_factor, 'SW')
+        model.load_combos['Mass'].factors['SW'] = 1.0
+
+        return modal(model, num_modes=3)
+
+    negative_density = run(-RHO, +1.0)
+    positive_density = run(+RHO, -1.0)
+
+    assert negative_density.total_mass['Y'] == pytest.approx(MU*L, rel=1e-12)
+    assert np.array_equal(negative_density.frequencies, positive_density.frequencies)
+    assert np.array_equal(negative_density.mode_shapes, positive_density.mode_shapes)
+
+
+def test_all_four_sign_combinations_carry_the_same_mass():
+    """Neither sign matters to the mass, only the product's magnitude."""
+
+    totals = set()
+
+    for rho in (-RHO, +RHO):
+        for self_weight_factor in (-1.0, +1.0):
+
+            model = beam_model('simply supported', self_weight=False)
+            model.materials['Steel'].rho = rho
+            model.add_member_self_weight('FY', self_weight_factor, 'SW')
+            model.load_combos['Mass'].factors['SW'] = 1.0
+
+            totals.add(round(modal(model, num_modes=1).total_mass['Y'], 12))
+
+    assert totals == {round(MU*L, 12)}
+
+
+def test_self_weight_factor_scales_the_mass():
+    """A self-weight factor raised to account for connections must raise the mass too.
+
+    `add_member_self_weight(direction, factor)` applies `factor*rho*A` as the load, so a factor of
+    1.15 means the member weighs 15% more. That extra weight has to appear dynamically as well as
+    statically, or a model tuned for connection weight would report frequencies that are too high.
+    """
+
+    for self_weight_factor in (1.0, 1.15, 2.0):
+
+        model = beam_model('simply supported', self_weight=False)
+        model.add_member_self_weight('FY', -self_weight_factor, 'SW')
+        model.load_combos['Mass'].factors['SW'] = 1.0
+
+        results = modal(model, num_modes=1)
+
+        assert results.total_mass['Y'] == pytest.approx(MU*L*self_weight_factor, rel=1e-9), (
+            f'A self-weight factor of {self_weight_factor} did not scale the mass'
+        )
+
+
+def test_opposing_self_weight_cases_add_rather_than_cancel():
+    """Two self-weight contributions of opposing sign must add, not cancel.
+
+    Mass has to be accumulated as magnitudes. Summing signed contributions and taking the absolute
+    value only at the end lets a pair of opposing self-weight cases -- from mixed density sign
+    conventions across materials, or a negative combination factor -- silently zero the self-mass.
+    """
+
+    model = beam_model('simply supported', self_weight=False)
+    model.add_member_self_weight('FY', -1.0, 'D1')
+    model.add_member_self_weight('FY', +1.0, 'D2')
+    model.load_combos['Mass'].factors['D1'] = 1.0
+    model.load_combos['Mass'].factors['D2'] = 1.0
+
+    results = modal(model, num_modes=1)
+
+    # Two self-weight loads means twice the mass, not zero
+    assert results.total_mass['Y'] == pytest.approx(2*MU*L, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------------------------
+# Participation
+# ---------------------------------------------------------------------------------------------
+
+def test_participating_mass_is_the_free_dof_mass():
+    """Participating mass must be the mass on the free DOFs, below the assembled total.
+
+    Mass held on a restrained DOF cannot move in any mode, so it is unreachable no matter how many
+    modes are computed. Reporting it separately is what stops a consumer from dividing effective
+    modal mass by the total and concluding that participation never completes.
+    """
+
+    results = modal(beam_model('simply supported'), num_modes=3)
+
+    # In plane there is mobilizable mass, but less than the total, because the supports hold some
+    for direction in 'XY':
+        assert 0 < results.participating_mass[direction] < results.total_mass[direction]
+
+    # Out of plane there is none at all: a planar analysis restrains every out-of-plane DOF, so no
+    # mode can mobilize mass in that direction even though the mass is still assembled
+    assert results.participating_mass['Z'] == 0.0
+    assert results.total_mass['Z'] > 0.0
+
+
+def test_participating_mass_equals_the_hand_calculation():
+    """The exposed value must equal the `r.T @ M11 @ r` a consumer would compute by hand."""
+
+    results = modal(beam_model('simply supported'), num_modes=3)
+
+    M11 = results.M.toarray()[np.ix_(results.free_dof_indices, results.free_dof_indices)]
+
+    for offset, direction in enumerate('XYZ'):
+
+        r = np.zeros(results.M.shape[0])
+        r[offset::6] = 1.0
+        r11 = r[results.free_dof_indices]
+
+        assert results.participating_mass[direction] == pytest.approx(float(r11 @ (M11 @ r11)),
+                                                                     rel=1e-12)
+
+
+def test_effective_mass_sums_to_the_participating_mass():
+    """Summed over a complete set of modes, effective modal mass equals the participating mass.
+
+    This is the completeness identity that participation post-processing rests on: the mode shapes
+    span the free DOFs. A small model is used so every mode can be solved for, which makes the
+    identity exact rather than approximate.
+    """
+
+    results = modal(beam_model('simply supported'), num_modes=400, elements_per_member=2)
+
+    assert results.mode_count == len(results.free_dof_indices)
+
+    for direction in 'XY':
+
+        effective = results.effective_mass(direction)
+
+        assert effective.sum() == pytest.approx(results.participating_mass[direction], rel=1e-9)
+
+        # And the normalized form accounts for everything
+        assert results.mass_participation(direction).sum() == pytest.approx(1.0, rel=1e-9)
+
+    # A direction with no mobilizable mass reports zero participation rather than dividing by zero
+    assert results.participating_mass['Z'] == 0.0
+    assert np.all(results.effective_mass('Z') == 0.0)
+    assert np.all(results.mass_participation('Z') == 0.0)
+
+
+def test_participation_api_matches_the_hand_calculation():
+    """The convenience methods must agree with the matrix algebra they replace."""
+
+    results = modal(beam_model('simply supported'), num_modes=4)
+
+    M11 = results.M.toarray()[np.ix_(results.free_dof_indices, results.free_dof_indices)]
+    r = np.zeros(results.M.shape[0])
+    r[1::6] = 1.0
+    r11 = r[results.free_dof_indices]
+
+    gamma = results.mode_shapes.T @ (M11 @ r11)
+
+    assert np.allclose(results.participation_factors('Y'), gamma, rtol=1e-9)
+    assert np.allclose(results.effective_mass('Y'), gamma**2, rtol=1e-9)
+    assert np.allclose(results.mass_participation('Y'),
+                       gamma**2/results.participating_mass['Y'], rtol=1e-9)
+
+
+def test_mass_participation_identifies_the_governing_mode():
+    """The governing mode is the lowest one with real participation, not necessarily mode 1.
+
+    A simply supported beam's antisymmetric modes participate in nothing, which is exactly why "the
+    frequency of the beam" has to be chosen on effective mass rather than by taking the first mode.
+    """
+
+    results = modal(beam_model('simply supported'), num_modes=6)
+
+    participation = results.mass_participation('Y')
+
+    # Mode 1 dominates, approaching the continuum value of 8/pi**2 of the total mass
+    assert participation[0] > 0.8
+
+    # Mode 2 is antisymmetric and participates in nothing
+    assert participation[1] < 1e-6
+
+    # Picking the governing mode the way a consumer would
+    governing = int(np.argmax(participation > 0.05))
+    assert governing == 0
+    assert results.frequencies[governing] == pytest.approx(beam_frequency(np.pi**2), rel=2e-3)
+
+
+def test_participation_rejects_a_bad_direction():
+    """A mistyped direction must fail loudly rather than return zeros."""
+
+    results = modal(beam_model('simply supported'), num_modes=1)
+
+    with pytest.raises(ValueError, match='direction'):
+        results.effective_mass('vertical')
+
+
+def test_mass_per_node_is_the_same_in_every_direction():
+    """Per-node mass shares must not depend on which direction they are taken in.
+
+    A full translational row of the consistent mass matrix sums to half the element mass whether it
+    is the axial row (140 + 70) or a transverse one (156 + 54), so the shares coincide. This is why
+    the reported shares need no direction of their own.
+    """
+
+    results = modal(beam_model('simply supported', n_user_nodes=5), num_modes=2)
+
+    M = results.M.toarray()
+
+    for offset in range(3):
+
+        r = np.zeros(M.shape[0])
+        r[offset::6] = 1.0
+        Mr = M @ r
+
+        by_direction = {name: Mr[node_id*6 + offset]
+                        for name, node_id in [(n, i) for i, n in enumerate(results.mass_per_node)]}
+
+        # Compare against the reported shares, which are taken in Y
+        for name, share in results.mass_per_node.items():
+            assert by_direction[name] == pytest.approx(share, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------------------------
+# Provenance
+# ---------------------------------------------------------------------------------------------
+
+def test_diagnostics_record_the_run_provenance():
+    """Every argument that changes the answer must be readable back off the result.
+
+    Consumers need this for two things: a cache key that cannot drift out of step with the request
+    it describes, and documenting the analysis assumption, which has to state the mass basis,
+    gravity, the analysis plane and the linear-state declaration.
+    """
+
+    model = beam_model('simply supported')
+    results = model.analyze_modal(num_modes=3, mass_combo_name='Mass', mass_direction='Y',
+                                  gravity=GRAVITY, plane='XY', mass_formulation='lumped',
+                                  elements_per_member=6)
+
+    d = results.diagnostics
+
+    assert d.mass_combo_name == 'Mass'
+    assert d.mass_direction == 'Y'
+    assert d.gravity == GRAVITY
+    assert d.mass_formulation == 'lumped'
+    assert d.elements_per_member == 6
+    assert d.plane == 'XY'
+    assert d.linear_state is None
+
+    # Enough of it makes the one-line summary for a report to stand alone
+    summary = d.summary()
+    assert 'Mass' in summary
+    assert str(GRAVITY) in summary
+    assert 'XY plane' in summary
+    assert 'lumped' in summary
+
+
+def test_diagnostics_record_the_linear_state_declaration():
+    """A declared linear state has to be recorded, because it is an analysis assumption."""
+
+    model = beam_model('simply supported')
+    model.add_node('Mid', L/2, 0, 0)
+    model.add_node('Anchor', L/2, -2.0, 0)
+    model.def_support('Anchor', True, True, True, True, True, True)
+    model.add_member('Tie', 'Anchor', 'Mid', 'Steel', 'Section', tension_only=True)
+
+    results = modal(model, num_modes=1, linear_state='all_active')
+
+    assert results.diagnostics.linear_state == 'all_active'
+    assert "linear state 'all_active'" in results.diagnostics.summary()
+
+
+def test_diagnostics_report_a_three_dimensional_run():
+    """A run with no plane declared must say so rather than leaving the field ambiguous.
+
+    A cantilever is used because it is fully restrained at its base and so stable in three
+    dimensions. The simply supported fixture is not: with nothing holding it out of plane it is free
+    to translate and twist as a rigid body, and a three-dimensional run of it is refused as a
+    mechanism.
+    """
+
+    results = beam_model('cantilever').analyze_modal(
+        num_modes=2, mass_combo_name='Mass', gravity=GRAVITY
+    )
+
+    assert results.diagnostics.plane is None
+    assert '3D' in results.diagnostics.summary()
+
+
+def test_diagnostics_report_whether_shear_deformation_was_active():
+    """Forcing Timoshenko on does nothing unless a section defines a shear area.
+
+    `add_section` defaults both shear areas to zero, and the stiffness matrix skips the shear
+    correction when they are, so a model built without them is solved as Euler-Bernoulli despite the
+    forcing. Reporting which one was used keeps that visible, and flags in advance that supplying
+    shear areas will move every modal frequency.
+    """
+
+    without = modal(beam_model('simply supported'), num_modes=1)
+
+    assert without.diagnostics.shear_deformation is False
+    assert 'Euler-Bernoulli' in without.diagnostics.summary()
+
+    # The same beam with shear areas defined
+    model = beam_model('simply supported')
+    model.sections['Section'].Asy = 0.006
+    model.sections['Section'].Asz = 0.004
+    with_shear = modal(model, num_modes=1)
+
+    assert with_shear.diagnostics.shear_deformation is True
+    assert 'Timoshenko' in with_shear.diagnostics.summary()
+
+    # Shear flexibility can only lower the frequency
+    assert with_shear.frequencies[0] < without.frequencies[0]
+
+
+# ---------------------------------------------------------------------------------------------
+# Isolation, without subdivision
+# ---------------------------------------------------------------------------------------------
+
+def test_static_results_survive_modal_analysis_without_subdivision():
+    """Isolation must not depend on the arguments given.
+
+    Preparing a model for analysis clears every stored nodal displacement, so a modal run that
+    solved on the caller's own model would erase their static results without raising anything. The
+    `elements_per_member=1, plane=None` combination is the one that has nothing to subdivide and
+    nothing to restrain, and so the one where an "only copy when needed" optimisation would skip the
+    copy and do the damage.
+    """
+
+    model = beam_model('simply supported', brace_out_of_plane=True)
+    model.add_member_dist_load('M1', 'FY', -10.0, -10.0, case='Q')
+    model.add_load_combo('Static', {'Q': 1.0})
+    model.add_node('Mid', L/2, 0, 0)
+    model.nodes['Mid'].support_DZ = True
+    model.nodes['Mid'].support_RX = True
+    model.nodes['Mid'].support_RY = True
+
+    model.analyze_linear()
+    static_before = {name: node.DY['Static'] for name, node in model.nodes.items()}
+
+    assert any(value != 0 for value in static_before.values()), 'The fixture computed no deflection'
+
+    # No subdivision and no plane restraint: nothing for the analysis to change
+    model.analyze_modal(num_modes=2, mass_combo_name='Mass', gravity=GRAVITY,
+                        elements_per_member=1)
+
+    for name, node in model.nodes.items():
+        assert 'Static' in node.DY, f"Static results were erased from node {name}"
+        assert node.DY['Static'] == static_before[name]
+
+
+@pytest.mark.parametrize('kwargs', [
+    {'elements_per_member': 1},
+    {'elements_per_member': 1, 'plane': 'XY'},
+    {'elements_per_member': 4},
+    {'elements_per_member': 4, 'plane': 'XY'},
+])
+def test_model_geometry_survives_every_argument_combination(kwargs):
+    """The caller's geometry and supports must come back untouched however modal was called."""
+
+    model = beam_model('simply supported')
+    nodes_before = set(model.nodes)
+    supports_before = {name: (node.support_DX, node.support_DY, node.support_DZ,
+                              node.support_RX, node.support_RY, node.support_RZ)
+                       for name, node in model.nodes.items()}
+
+    model.analyze_modal(num_modes=2, mass_combo_name='Mass', gravity=GRAVITY, **kwargs)
+
+    assert set(model.nodes) == nodes_before
+    assert not any(name.startswith('_modal_') for name in model.nodes)
+
+    for name, node in model.nodes.items():
+        assert (node.support_DX, node.support_DY, node.support_DZ,
+                node.support_RX, node.support_RY, node.support_RZ) == supports_before[name]
