@@ -14,16 +14,21 @@ The tests check:
   4. A deep beam (short span, large section) shows a significant shear
      contribution, confirming the formulation is active.
 
-Tests 7–11 document known gaps in the Timoshenko implementation:
-  - Fixed-end reactions use Euler-Bernoulli formulas (no Phi terms).
-  - BeamSeg internal deflection/slope ignore shear deformation.
-  - SteelSection has no Asy/Asz API.
-These are marked xfail so the suite stays green.
+Tests 7 onwards cover fixed-end reactions, BeamSeg internal deflection and
+slope, and the SteelSection Asy/Asz API. All are implemented and asserted
+normally; there are no xfail markers in this module.
+
+A warning for anyone extending the fixed-end-reaction tests below: a
+*symmetric* load case cannot detect an error in the Timoshenko Phi terms.
+A midspan point load gives PL/8 and a full-span UDL gives wL^2/12 for any
+value of Phi, so those cases pass identically against a correct and an
+incorrect implementation. Asymmetric loads are mandatory. See
+test_fer_timoshenko.py, which checks against a mesh-refined oracle that
+does not touch FixedEndReactions at all.
 """
 
 from Pynite import FEModel3D
 import math
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -319,24 +324,28 @@ def test_fixed_beam_reactions_timoshenko():
     model.add_load_combo('Combo 1', {'Case 1': 1.0})
     model.analyze_linear(log=False)
 
-    # Euler-Bernoulli fixed-end moments (what PyNite currently produces)
+    # Euler-Bernoulli fixed-end moment at i
     M_eb_i = -P * a * b**2 / L**2
-    M_eb_j =  P * a**2 * b / L**2
 
-    # Timoshenko correction: Phi_z = 12·E·Iz / (G·Asy·L²)
+    # Timoshenko fixed-end moment at i, from the closed-form solution of the
+    # fixed-fixed Timoshenko beam:
+    #     M_0 = -P*a*b*(b + Phi*L/2) / (L^2 * (1 + Phi))
+    # At Phi = 0 this reduces exactly to -P*a*b^2/L^2.
+    #
+    # Note the direction of the correction: the Timoshenko moment moves
+    # *toward* zero relative to Euler-Bernoulli for a load in the near half
+    # (a < L/2). An implementation that moves it the other way is wrong.
     Phi = 12 * _E * _Iz / (_G * _Asy * L**2)
-    # Timoshenko FER moments for a point load at distance a (Cook et al.)
-    M_timo_i = -P * a * b**2 / L**2 - P * Phi * (1 - 2*a/L) / (2*(1 + Phi))
-    # The reaction moment at j has a complementary correction
+    M_timo_i = -P * a * b * (b + Phi * L / 2) / (L**2 * (1 + Phi))
 
-    # Get the reaction moment at node N1 (RZ component)
     RZ_N1 = model.nodes['N1'].RxnMZ['Combo 1']
 
-    # If PyNite correctly implemented Timoshenko FER, this would match:
-    assert not math.isclose(M_timo_i, M_eb_i, rel_tol=1e-3), \
+    assert not math.isclose(M_timo_i, M_eb_i, rel_tol=1e-4), \
         'Timoshenko and EB moments should differ — test setup problem'
-    assert math.isclose(RZ_N1, M_timo_i, rel_tol=1e-3), \
-        f'Fixed-end moment: FEM={RZ_N1:.4f}, Timoshenko={M_timo_i:.4f}, EB={M_eb_i:.4f}'
+    assert M_timo_i < M_eb_i, \
+        f'Timoshenko moment must be below EB for a<L/2: {M_timo_i} vs {M_eb_i}'
+    assert math.isclose(RZ_N1, M_timo_i, rel_tol=1e-9), \
+        f'Fixed-end moment: FEM={RZ_N1:.6f}, Timoshenko={M_timo_i:.6f}, EB={M_eb_i:.6f}'
 
 
 # ---------------------------------------------------------------------------
@@ -409,11 +418,11 @@ def test_cantilever_internal_slope_timoshenko():
 
 
 # ---------------------------------------------------------------------------
-# Test 11 – SteelSection cannot carry shear area properties
+# Test 11 – SteelSection shear areas default to zero when omitted
 # ---------------------------------------------------------------------------
 
-def test_steel_section_no_shear_areas():
-    """SteelSection now accepts Asy/Asz — defaults to 0.0 when not provided."""
+def test_steel_section_shear_areas_default_to_zero():
+    """SteelSection accepts Asy/Asz and defaults them to 0.0 when omitted."""
     model = FEModel3D()
     model.add_material('Steel', _E, _G, 0.3, 7850.0)
     model.add_steel_section('IPE200', _A, _Iy, _Iz, _J,
@@ -584,15 +593,17 @@ def test_short_thick_fixed_beam_reactions():
     # Euler-Bernoulli fixed-end moment at i
     M_eb_i = -P * a * b**2 / _st_L**2
 
-    # Timoshenko fixed-end moment from our FER derivation (Cramer's rule)
-    from Pynite.FixedEndReactions import FER_PtLoad
-    fer = FER_PtLoad(P, a, _st_L, 'Fy', Phi)
-    M_timo_i = fer[5, 0]
+    # Independent closed form. This must NOT be obtained by calling
+    # FER_PtLoad: doing so only asserts that the assembler and the FER
+    # function agree with each other, which is true for any value of the
+    # Phi terms and so cannot fail.
+    M_timo_i = -P * a * b * (b + Phi * _st_L / 2) / (_st_L**2 * (1 + Phi))
 
     RZ_N1 = model.nodes['N1'].RxnMZ['Combo 1']
 
-    # The FEM reaction must differ from EB and match the Timoshenko FER
+    # The FEM reaction must differ from EB and match the Timoshenko value.
+    # Phi = 0.27 here, so the two differ by ~5% — well outside the tolerance.
     assert not math.isclose(RZ_N1, M_eb_i, rel_tol=0.01), \
-        f'Reaction matches EB — Timoshenko correction not active'
-    assert math.isclose(RZ_N1, M_timo_i, rel_tol=1e-6), \
+        'Reaction matches EB — Timoshenko correction not active'
+    assert math.isclose(RZ_N1, M_timo_i, rel_tol=1e-9), \
         f'Fixed-beam reaction: FEM={RZ_N1:.6e}, expected={M_timo_i:.6e}'
