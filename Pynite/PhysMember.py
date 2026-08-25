@@ -31,6 +31,9 @@ class PhysMember(Member3D):
         super().__init__(model, name, i_node, j_node, material_name, section_name, rotation, tension_only, comp_only, beam_type)
         self.sub_members: Dict[str, Member3D] = {}
 
+    def __repr__(self) -> str:
+        return f"PhysMember(name={self.name!r}, i_node={self.i_node.name!r}, j_node={self.j_node.name!r})"
+
     def descritize(self) -> None:
         """
         Subdivides the physical member into sub-members at each node along the physical member
@@ -302,7 +305,8 @@ class PhysMember(Member3D):
             return (Vmin, governing_combo)
         return Vmin
 
-    def plot_shear(self, Direction: Literal['Fy', 'Fz'], combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20) -> None:
+    def plot_shear(self, Direction: Literal['Fy', 'Fz'], combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20,
+                   figsize: tuple[float, float] = (7, 3)) -> None:
         """
         Plots the shear diagram for the member.
 
@@ -318,6 +322,8 @@ class PhysMember(Member3D):
             max/min envelope is shown.
         n_points: int
             The number of points used to generate the plot
+        figsize : tuple of (float, float)
+            Figure size in inches as (width, height).
         """
 
         # Import 'pyplot' if not already done
@@ -331,7 +337,7 @@ class PhysMember(Member3D):
             combo_names = [name for name, combo in self.model.load_combos.items()
                            if combo.combo_tags is not None and any(tag in combo.combo_tags for tag in combo_name)]
 
-        fig, ax = PhysMember.__plt.subplots()
+        fig, ax = PhysMember.__plt.subplots(figsize=figsize)
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -533,7 +539,8 @@ class PhysMember(Member3D):
             return (Mmin, governing_combo)
         return Mmin
 
-    def plot_moment(self, Direction: Literal['My', 'Mz'], combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20) -> None:
+    def plot_moment(self, Direction: Literal['My', 'Mz'], combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20,
+                    figsize: tuple[float, float] = (7, 3)) -> None:
         """
         Plots the moment diagram for the member.
 
@@ -549,6 +556,8 @@ class PhysMember(Member3D):
             max/min envelope is shown.
         n_points: int
             The number of points used to generate the plot
+        figsize : tuple of (float, float)
+            Figure size in inches as (width, height).
         """
 
         # Import 'pyplot' if not already done
@@ -562,7 +571,7 @@ class PhysMember(Member3D):
             combo_names = [name for name, combo in self.model.load_combos.items()
                            if combo.combo_tags is not None and any(tag in combo.combo_tags for tag in combo_name)]
 
-        fig, ax = PhysMember.__plt.subplots()
+        fig, ax = PhysMember.__plt.subplots(figsize=figsize)
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -639,9 +648,11 @@ class PhysMember(Member3D):
 
             x_subm_array = x_array[filter] - x_o
 
-            # Check if P-Delta analysis was run
+            # Check if second-order effects should be included in sampled moments
             if self.model.solution == 'P-Delta':
                 PDelta = True
+            elif self.model.solution == 'Pushover':
+                PDelta = getattr(self.model, '_pushover_P_Delta', False)
             else:
                 PDelta = False
 
@@ -759,7 +770,8 @@ class PhysMember(Member3D):
             return (Tmin, governing_combo)
         return Tmin
 
-    def plot_torque(self, combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20) -> None:
+    def plot_torque(self, combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20,
+                    figsize: tuple[float, float] = (7, 3)) -> None:
         """
         Plots the torque diagram for the member.
 
@@ -771,6 +783,8 @@ class PhysMember(Member3D):
             max/min envelope is shown.
         n_points: int
             The number of points used to generate the plot
+        figsize : tuple of (float, float)
+            Figure size in inches as (width, height).
         """
 
         # Import 'pyplot' if not already done
@@ -784,7 +798,7 @@ class PhysMember(Member3D):
             combo_names = [name for name, combo in self.model.load_combos.items()
                            if combo.combo_tags is not None and any(tag in combo.combo_tags for tag in combo_name)]
 
-        fig, ax = PhysMember.__plt.subplots()
+        fig, ax = PhysMember.__plt.subplots(figsize=figsize)
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -966,7 +980,8 @@ class PhysMember(Member3D):
             return (Pmin, governing_combo)
         return Pmin
 
-    def plot_axial(self, combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20) -> None:
+    def plot_axial(self, combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20,
+                   figsize: tuple[float, float] = (7, 3)) -> None:
         """
         Plots the axial force diagram for the member.
 
@@ -978,6 +993,8 @@ class PhysMember(Member3D):
             max/min envelope is shown.
         n_points: int
             The number of points used to generate the plot
+        figsize : tuple of (float, float)
+            Figure size in inches as (width, height).
         """
 
         # Import 'pyplot' if not already done
@@ -991,7 +1008,7 @@ class PhysMember(Member3D):
             combo_names = [name for name, combo in self.model.load_combos.items()
                            if combo.combo_tags is not None and any(tag in combo.combo_tags for tag in combo_name)]
 
-        fig, ax = PhysMember.__plt.subplots()
+        fig, ax = PhysMember.__plt.subplots(figsize=figsize)
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -1201,7 +1218,8 @@ class PhysMember(Member3D):
         member, x_mod = self.find_member(x)
         return member.rel_deflection(Direction, x_mod, combo_name)
 
-    def plot_deflection(self, Direction: Literal['dx', 'dy', 'dz'], combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20) -> None:
+    def plot_deflection(self, Direction: Literal['dx', 'dy', 'dz'], combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20,
+                        figsize: tuple[float, float] = (7, 3)) -> None:
         """
         Plots the deflection diagram for the member.
 
@@ -1217,6 +1235,8 @@ class PhysMember(Member3D):
             max/min envelope is shown.
         n_points: int
             The number of points used to generate the plot
+        figsize : tuple of (float, float)
+            Figure size in inches as (width, height).
         """
 
         # Import 'pyplot' if not already done
@@ -1230,7 +1250,7 @@ class PhysMember(Member3D):
             combo_names = [name for name, combo in self.model.load_combos.items()
                            if combo.combo_tags is not None and any(tag in combo.combo_tags for tag in combo_name)]
 
-        fig, ax = PhysMember.__plt.subplots()
+        fig, ax = PhysMember.__plt.subplots(figsize=figsize)
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -1309,13 +1329,39 @@ class PhysMember(Member3D):
 
             x_subm_array = x_array[filter] - x_o
 
+            # Check if second-order effects should be included in sampled deflections
+            if self.model.solution == 'P-Delta':
+                PDelta = True
+            elif self.model.solution == 'Pushover':
+                PDelta = getattr(self.model, '_pushover_P_Delta', False)
+            else:
+                PDelta = False
+
+            # An inactive submember (e.g. a slack tension-only member) carries no
+            # internal forces, so it stays straight between its end nodes rather
+            # than bending. Use the linear interpolation of its end-node
+            # displacements, which it rides along with, instead of a segment-based
+            # bending shape (see issue #317).
+            if not submember.active[combo_name]:
+                d_loc = submember._inactive_local_disp(combo_name)
+                if Direction == 'dx':
+                    di, dj = d_loc[0, 0], d_loc[6, 0]
+                elif Direction == 'dy':
+                    di, dj = d_loc[1, 0], d_loc[7, 0]
+                elif Direction == 'dz':
+                    di, dj = d_loc[2, 0], d_loc[8, 0]
+                else:
+                    raise ValueError(f"Direction must be 'dx', 'dy' or 'dz'. {Direction} was given.")
+                L_subm = submember.L()
+                d_array = array([x_subm_array, di + (dj - di) * x_subm_array / L_subm])
+
             # Check which axis is of interest
-            if Direction == 'dx':
+            elif Direction == 'dx':
                 d_array = self._extract_vector_results(submember.SegmentsZ, x_subm_array, 'axial_deflection')
             elif Direction == 'dy':
-                d_array = self._extract_vector_results(submember.SegmentsZ, x_subm_array, 'deflection')
+                d_array = self._extract_vector_results(submember.SegmentsZ, x_subm_array, 'deflection', PDelta)
             elif Direction == 'dz':
-                d_array = self._extract_vector_results(submember.SegmentsY, x_subm_array, 'deflection')
+                d_array = self._extract_vector_results(submember.SegmentsY, x_subm_array, 'deflection', PDelta)
             else:
                 raise ValueError(f"Direction must be 'dy' or 'dz'. {Direction} was given.")
 

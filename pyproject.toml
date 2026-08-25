@@ -1,9 +1,15 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "PyNiteFEA"
-version = "2.4.1"
-description = "A simple elastic 3D structural finite element library for Python."
-readme = "README.md"
-license = { text = "MIT" }
+version = "3.0.0"
+description = "A simple 3D structural finite element library for Python."
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "D. Craig Brinck, PE, SE", email = "Building.Code@outlook.com" },
 ]
@@ -12,44 +18,53 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-requires-python = ">=3.11"
 dependencies = [
+    "matplotlib",
     "numpy>=2.4.0",
     "prettytable",
     "scipy",
-    "matplotlib",
 ]
 
 [project.optional-dependencies]
 all = [
     "ipython",
-    "vtk>=9.3.0",
-    "pyvista[all]>=0.43.4",
-    "trame_jupyter_extension",
     "ipywidgets",
-    "pdfkit",
+    "jinja2",
+    "pyvista[all,trame]>=0.43.4",
+    "trame-jupyter-extension",
+    "vtk>=9.3.0",
+]
+vtk = [
+    "ipython",
+    "vtk>=9.3.0",
+]
+pyvista = [
+    "ipywidgets",
+    "pyvista[all,trame]>=0.43.4",
+    "trame-jupyter-extension",
+]
+reporting = [
     "jinja2",
 ]
-vtk = ["ipython", "vtk>=9.3.0"]
-pyvista = ["pyvista[all]>=0.43.4", "trame_jupyter_extension", "ipywidgets"]
-reporting = ["pdfkit", "jinja2"]
-derivations = ["jupyterlab", "sympy"]
+derivations = [
+    "jupyterlab",
+    "sympy",
+]
 
 [project.urls]
-Repository = "https://github.com/JWock82/Pynite.git"
+Homepage = "https://github.com/JWock82/Pynite"
 
-[build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
+[dependency-groups]
+dev = [
+    "coverage",
+    "flake8",
+    "pytest",
+]
 
 [tool.setuptools.packages.find]
 include = ["Pynite", "Pynite.*"]
 
 [tool.setuptools.package-data]
-Pynite = ["*.html", "*.css", "*.png"]
-
-[dependency-groups]
-dev = ["pytest"]
+Pynite = ["*html", "*.css", "*Full Logo No Buffer - Transparent.png"]

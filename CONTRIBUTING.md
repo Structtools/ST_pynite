@@ -14,10 +14,52 @@ If you would like to contribute to Pynite, please review the following guideline
 6. Follow the coding guidelines above. This will make review go much faster.
 7. Pull requests for any active repository `Projects` will usually be given first priorty.
 
-## Testing
+## Development Setup
 
-Run tests using `pytest`.
+Pynite uses [uv](https://docs.astral.sh/uv/) to manage development environments and locked
+dependencies. Install uv, then create the environment and install the project with its test tools
+and optional runtime dependencies:
 
 ```bash
-pytest
+uv sync --locked --extra all --all-groups
 ```
+
+When project dependencies change, update `pyproject.toml` and regenerate the committed lockfile:
+
+```bash
+uv lock
+```
+
+## Testing
+
+Run tests inside the managed environment using `uv run`:
+
+```bash
+uv run --locked pytest
+```
+
+## Linting
+
+Linting is handled by [ruff](https://docs.astral.sh/ruff/), with hooks managed by [prek](https://github.com/j178/prek). The rules live in `ruff.toml`, and currently only check for unused imports (F401).
+
+Install prek outside the project environment, so that git GUI clients can run the hooks without activating a virtualenv:
+
+```bash
+uv tool install prek
+```
+
+`pipx install prek` works too. Then install the git hook:
+
+```bash
+prek install
+```
+
+The configured checks now run against your staged files on every commit, fixing what they can. To run them across the whole repository:
+
+```bash
+prek run --all-files
+```
+
+The same checks run in CI on every pull request.
+
+prek reads `.pre-commit-config.yaml`, which is the standard pre-commit config format, so stock `pre-commit` works against the same config if you already use it. If you want ruff in your editor, install it separately and match the version pinned in `.pre-commit-config.yaml` so it reports the same results as the hook.

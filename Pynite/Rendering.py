@@ -67,6 +67,7 @@ class Renderer:
         self._scalar_bar_text_size: int = 24
         self._member_diagrams: Optional[str] = None  # Options: None, 'Fy', 'Fz', 'My', 'Mz', 'Fx', 'Tx'
         self._diagram_scale: float = 30.0
+        self._member_csys: bool = False
         self.theme: str = 'default'
 
         # Callback list for post-update customization:
@@ -105,6 +106,9 @@ class Renderer:
         self._spring_label_points: List[List[float]] = []
         self._spring_labels: List[str] = []
 
+    def __repr__(self) -> str:
+        return f"Renderer(model={self.model!r})"
+    
     @property
     def window_width(self) -> int:
         return self.plotter.window_size[0]
@@ -248,6 +252,15 @@ class Renderer:
     def diagram_scale(self, scale: float) -> None:
         self._diagram_scale = scale
 
+    @property
+    def member_csys(self) -> bool:
+        """Enable or disable rendering of member local coordinate systems."""
+        return self._member_csys
+
+    @member_csys.setter
+    def member_csys(self, render: bool) -> None:
+        self._member_csys = render
+
     def _calculate_auto_annotation_size(self) -> float:
         """Calculate automatic annotation size as 5% of shortest node distance.
 
@@ -305,7 +318,7 @@ class Renderer:
             self.plotter.off_screen = True
 
         # Update the plotter with the latest geometry
-        self.update(reset_camera)
+        self.update(reset_camera, off_screen=off_screen)
 
         # Render the model (code execution will pause here until the user closes the window)
         try:
@@ -332,28 +345,80 @@ class Renderer:
         """
 
         # Update the plotter with the latest geometry
-        self.update(reset_camera)
+        # Use off_screen=False for interactive mode, off_screen=True for non-interactive
+        self.update(reset_camera, off_screen=not interact)
 
-        # In a Jupyter notebook pyvista will always take the screenshot prior to allowing user interaction. In order to get interaction before taking the screenshot, `render_model` must be called in a cell before `screenshot`. Since `render_model` will show the plotter, there is no need to show it again when using `screenshot`. This next line prevents showing the plotter twice.
+        # In a Jupyter notebook pyvista will always take the screenshot prior to allowing user
+        # interaction. In order to get interaction before taking the screenshot, `render_model`
+        # must be called in a cell before `screenshot`. Since `render_model` will show the plotter,
+        # there is no need to show it again when using `screenshot`. This next line prevents
+        # showing the plotter twice.
         self.plotter.notebook = False
 
-        # For non-Jupyter environments, determine if the user should interact with the window before capturing the screenshot
-        if interact == False: self.plotter.off_screen = True
+        if interact:
+            # For interactive mode, use show() to allow user to adjust the camera.
+            # The screenshot is captured when the user presses 'q'.
+            # Note: auto_close=False keeps the plotter active for subsequent calls.
+            self.plotter.show(
+                title='Pynite - Simple Finite Element Anlaysis for Python',
+                screenshot=filepath,
+                auto_close=False
+                )
+        else:
+            # For non-interactive mode, render the scene and capture screenshot without interaction.
+            # The plotter was created in off-screen mode by _refresh_plotter during update().
+            self.plotter.render()
+            self.plotter.screenshot(filepath)
 
-        # Save the screenshot to the specified filepath. Note that `auto_close` shuts down the entire plotter after the screenshot is taken, rather than just closing the window. We'll set `auto_close=False` to allow the plotter to remain active. Note that the window must be closed by pressing `q`. Closing it with the 'X' button in the window's corner will close the whole plotter down.
-        self.plotter.show(
-            title='Pynite - Simple Finite Element Anlaysis for Python',
-            screenshot=filepath,
-            auto_close=False
-            )
+    def _refresh_plotter(self, off_screen: bool = False) -> None:
+        """Create a fresh plotter object, preserving camera position and window size.
 
-    def update(self, reset_camera: bool = True) -> None:
+        PyVista plotters can become corrupted after show() is called and the window
+        is closed by the user. This method creates a new plotter while preserving
+        important states like camera angle and window dimensions.
+        
+        :param bool off_screen: Whether to create plotter in off-screen mode (default ``True``).
+        """
+        # Save the current state before creating a new plotter
+        saved_camera = None
+
+        try:
+            saved_camera = self.plotter.camera_position
+        except Exception:
+            pass
+        
+        try:
+            saved_window_size = self.plotter.window_size
+        except Exception:
+            saved_window_size = (750, 750)  # Default size if we can't get it from the plotter
+        
+        try:
+            saved_notebook = self.plotter.notebook
+        except Exception:
+            saved_notebook = False
+
+        # Create a new plotter with specified off_screen setting
+        self.plotter = pv.Plotter(off_screen=off_screen, notebook=saved_notebook, window_size=saved_window_size)
+        self.plotter.set_background('white')
+        
+        # Restore camera position
+        if saved_camera is not None:
+            try:
+                self.plotter.camera_position = saved_camera
+            except Exception:
+                pass
+        
+        # Re-add the ExitEvent observer for the X button behavior
+        self.plotter.iren.add_observer('ExitEvent', lambda obj, event: obj.TerminateApp())
+
+    def update(self, reset_camera: bool = True, off_screen: bool = False) -> None:
         """Rebuild the PyVista plotter with current settings.
 
         Updates all visual elements (geometry, loads, labels, contours, diagrams)
         and calls post-update callbacks.
 
         :param bool reset_camera: Reset camera to fit model (default ``True``).
+        :param bool off_screen: Render off-screen without displaying a window (default ``False``).
         """
 
         # Clear annotation size cache to recalculate if model has changed
@@ -367,17 +432,15 @@ class Renderer:
             self.render_loads = False
             warnings.warn('Unable to render load combination. No load combinations defined.', UserWarning)
 
-        # Clear out the old plot (if any)
-        self.plotter.clear()
+        # Always refresh the plotter to avoid plotter corruption from previous show() calls.
+        self._refresh_plotter(off_screen=off_screen)
 
         # Set up view and axes (works for both interactive and off-screen modes)
-        try:
+        # Only reset the view if reset_camera is True, to preserve user's custom camera position
+        if reset_camera:
             self.plotter.view_xy()
-            self.plotter.show_axes()
             self.plotter.set_viewup((0, 1, 0))
-        except:
-            # Silently fail if not supported in this context
-            pass
+        self.plotter.show_axes()
 
         # Clear out internally stored labels (if any)
         self._load_label_points = []
@@ -457,6 +520,9 @@ class Renderer:
         # Render member diagrams if requested
         if self.member_diagrams and (self.combo_name is not None or self.case is not None):
             self.plot_member_diagrams()
+
+        if self.member_csys:
+            self.plot_member_local_csys()
 
         # Determine whether to show or hide the scalar bar
         # if self._scalar_bar == False:
@@ -1657,6 +1723,41 @@ class Renderer:
             except Exception:
                 # Silently skip members that fail to render diagrams
                 pass
+
+    def plot_member_local_csys(self) -> None:
+        
+        axis_length = self.annotation_size * 3
+
+        for member in self.model.members.values():
+            # Get the member local coordinate axes from the member transformation matrix
+            axes = member.T()[:3, :3]
+            # Plot each one as an arrow at the member centre point
+            centre_point = np.array(
+                [
+                    0.5 * (member.i_node.X + member.j_node.X),
+                    0.5 * (member.i_node.Y + member.j_node.Y),
+                    0.5 * (member.i_node.Z + member.j_node.Z),
+                ]
+            )
+            x_axis = pv.Arrow(
+                start=centre_point,
+                direction=axes[0],
+                scale=axis_length,
+            )
+            y_axis = pv.Arrow(
+                start=centre_point,
+                direction=axes[1],
+                scale=axis_length,
+            )
+            z_axis = pv.Arrow(
+                start=centre_point,
+                direction=axes[2],
+                scale=axis_length,
+            )
+            # Use the same color scheme as PyVista's global coordinate system widget
+            self.plotter.add_mesh(x_axis, color="red")
+            self.plotter.add_mesh(y_axis, color="green")
+            self.plotter.add_mesh(z_axis, color="blue")
 
 
 # === Visualization helper classes ===

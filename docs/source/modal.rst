@@ -20,10 +20,10 @@ How it works
 
 - Subdivides every physical member into ``elements_per_member`` elements for the duration of
   the analysis. This happens on an internal copy, so the caller's model is never modified.
-- Assembles the global stiffness matrix ``[K]`` and mass matrix ``[M]`` using the
+- Assembles the global elastic stiffness matrix ``[Ke]`` and mass matrix ``[M]`` using the
   specified ``mass_combo_name`` and ``mass_direction``.
 - Partitions out supported degrees of freedom before solving to avoid singularities.
-- Solves the generalized eigenproblem ``[K]{φ} = λ[M]{φ}`` where ``λ = ω²``. Frequencies
+- Solves the generalized eigenproblem ``[Ke]{φ} = λ[M]{φ}`` where ``λ = ω²``. Frequencies
   are returned in Hz as ``f = ω / (2π)``.
 - Discards eigenpairs that are rigid-body artifacts or that live only on massless degrees of
   freedom, recording each one in the result's diagnostics.

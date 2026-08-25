@@ -7,7 +7,7 @@
 ![Build Status](https://github.com/JWock82/Pynite/actions/workflows/build-and-test.yml/badge.svg)
 [![codecov](https://codecov.io/gh/JWock82/Pynite/branch/main/graph/badge.svg?token=ZH18US3A7P)](https://codecov.io/gh/JWock82/Pynite)
 ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/PyniteFEA)
-![PyPI - Downloads](https://img.shields.io/pypi/dm/PyNiteFEA?cacheSeconds=86400)
+![PyPI - Downloads](https://img.shields.io/pypi/dm/PyNiteFEA?cacheSeconds=172800)
 <img alt="GitHub code size in bytes" src="https://img.shields.io/github/languages/code-size/JWock82/Pynite">
 ![GitHub last commit](https://img.shields.io/github/last-commit/JWock82/Pynite)
 ![GitHub](https://img.shields.io/github/license/JWock82/Pynite)
@@ -24,6 +24,7 @@ For a more detailed discussion on installation options and dependencies see http
 * 3D static analysis of elastic structures.
 * P-&Delta; analysis of frame type structures.
 * Modal analysis of frame type structures.
+* Nonlinear pushover analysis of steel frames.
 * Member point loads, linearly varying distributed loads, and nodal loads are supported.
 * Classify loads by load case and create load combinations from load cases.
 * Produces shear, moment, and deflection results and diagrams for each member.
@@ -68,7 +69,14 @@ Here's a list of projects that use Pynite:
 * Phaenotyp (https://github.com/bewegende-Architektur/Phaenotyp) (https://youtu.be/shloSw9HjVI)
 
 # What's New?
-2.4.2 (in progress)
+3.0.1
+* Improved detection of unstable structures.
+
+3.0.0
+* Added pushover analysis! Currently, only steel sections are supported for pushover analysis. The assumed interaction equation used to estimate plastic behavior is currently calibrated toward I-shaped members.
+* Refactored all elastic stiffness matrix references from `K` and `k` to `Ke` and `ke`. Most users will not notice this change. Power users who were accessing the stiffness matrices directly will want to note this refactor.  This clarifies the code base by indicating which type of stiffness these matrices represent, and reduces ambiguity in preparation for addition of further geometric `Kg/kg` and plastic `Km/km` stiffness matrices.
+* User's can now control the size of member plots.
+* Improved `ShearWall.screenshots()` method. Added coupling beam plots. Added the ability to use the `VTK` renderer instead of the `pyvista` renderer for screenshots.
 * Removed individual load combo plots from member plots when an envelope plot is requested. They cluttered the plots without adding much value.
 
 2.4.1
@@ -97,7 +105,7 @@ v2.2.0
 * Updated documentation for rendering.
 
 v2.1.0
-* Major speed boost and leaner memory usage: the global stiffness/mass assembly plus the nodal load and fixed-end reaction builders now use block-based vectorized writes instead of Python loops, which keeps data in contiguous NumPy buffers rather than thousands of temporary Python objects. The dense solver sees ~15-25% faster `K`/`M` builds in our targeted benchmarks, while sparse solver runs see ~30% faster stiffness assembly in our benchmarks.
+* Major speed boost and leaner memory usage: the global stiffness/mass assembly plus the nodal load and fixed-end reaction builders now use block-based vectorized writes instead of Python loops, which keeps data in contiguous NumPy buffers rather than thousands of temporary Python objects. The dense solver sees ~15-25% faster `Ke`/`M` builds in our targeted benchmarks, while sparse solver runs see ~30% faster stiffness assembly in our benchmarks.
 * Meshes can now be regenerated with the `FEModel3D.meshes[mesh_name].generate()` command. This command removes the old mesh and replaces it with an updated one. The mesh will not remove nodes needed by other elements outside the mesh. Note that any loads applied to the old mesh will be lost when its elements and nodes are deleted. This makes meshes truly parametric.
 * Added `FEModel3D.delete_mesh()` to help deleting old meshes properly.
 * Renderers now automatically set the annotation size as 5% of the minimum distance between nodes. You still have the option of overiding this by setting the annotation size manually.

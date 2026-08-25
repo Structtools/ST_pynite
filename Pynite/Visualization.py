@@ -64,12 +64,16 @@ class Renderer():
         self._show_load_info = True
         self._member_diagrams = None  # Options: None, 'Fy', 'Fz', 'My', 'Mz', 'Fx', 'Tx'
         self._diagram_scale = 30  # Scale factor for diagram visualization
+        self._member_csys = False
 
         # Initialize VTK objects
         self.renderer = vtk.vtkRenderer()
         self.window = vtk.vtkRenderWindow()
         self.window.SetWindowName('Pynite - Simple Finite Element Analysis in Python')
         self.window.AddRenderer(self.renderer)
+
+    def __repr__(self) -> str:
+        return f"Renderer(model={self.model!r})"
 
     @property
     def window_size(self):
@@ -250,6 +254,15 @@ class Renderer():
     @diagram_scale.setter
     def diagram_scale(self, value):
         self._diagram_scale = value
+
+    @property
+    def member_csys(self) -> bool:
+        """Toggle rendering of member local coordinate system visualization."""
+        return self._member_csys
+
+    @member_csys.setter
+    def member_csys(self, render: bool) -> None:
+        self._member_csys = render
 
     def _calculate_auto_annotation_size(self):
         """Calculate automatic annotation size as 5% of shortest node distance.
@@ -544,6 +557,9 @@ class Renderer():
             _RenderContours(self.model, renderer, self.deformed_shape, self.deformed_scale,
                             self.color_map, self.scalar_bar, self.scalar_bar_text_size,
                             self.combo_name, self.theme)
+
+        if self.member_csys:
+            _RenderMemberCsys(self.model, renderer, self.theme, self.annotation_size)
 
         # Set the window's background color
         if self.theme == 'default':
@@ -2677,3 +2693,107 @@ def _RenderMemberDiagrams(model, renderer, diagram_type, scale_factor, combo_nam
         except Exception:
             # Skip members that can't create diagrams (e.g., inactive members)
             pass
+
+
+class VisLocalCsys:
+    """Arrow representation of a member local coordinate system."""
+
+    def __init__(self, position, direction, length, axis: str, theme: str = "default"):
+        """Create an arrow representing a member local coordinate system axis.
+
+        :param tuple position: Coordinates of the arrow base ``(X, Y, Z)``.
+        :param tuple direction: Direction vector for the local axis (need not be normalized).
+        :param float length: Visual length of the axis arrow; sign controls pointing direction.
+        :param str axis: Local axis identifier, one of ``'X'``, ``'Y'``, or ``'Z'``.
+        :param str theme: ``'default'`` or ``'print'`` color scheme.
+        """
+
+        # Create a unit vector in the direction of the 'direction' vector
+        unitVector = direction / norm(direction)
+
+        # Create a 'vtkAppendPolyData' filter to append the tip and shaft together into a single dataset
+        self.polydata = vtk.vtkAppendPolyData()
+
+        # Generate the tip of the load arrow
+        tip_length = abs(length) / 4
+        radius = abs(length) / 16
+        tip = vtk.vtkConeSource()
+        tip.SetCenter(
+            position[0] + (length + 0.5 * tip_length) * unitVector[0],
+            position[1] + (length + 0.5 * tip_length) * unitVector[1],
+            position[2] + (length + 0.5 * tip_length) * unitVector[2],
+        )
+
+        tip.SetDirection([direction[0], direction[1], direction[2]])
+        tip.SetHeight(tip_length)
+        tip.SetRadius(radius)
+        tip.Update()
+
+        # Add the arrow tip to the append filter
+        self.polydata.AddInputData(tip.GetOutput())
+
+        # Create the shaft
+        shaft = vtk.vtkLineSource()
+        shaft.SetPoint1(position)
+        shaft.SetPoint2(
+            (
+                position[0] + length * unitVector[0],
+                position[1] + length * unitVector[1],
+                position[2] + length * unitVector[2],
+            )
+        )
+        shaft.Update()
+
+        # Copy and append the shaft data to the append filter
+        self.polydata.AddInputData(shaft.GetOutput())
+        self.polydata.Update()
+
+        # Create a mapper and actor
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(self.polydata.GetOutputPort())
+        self.actor = vtk.vtkActor()
+
+        # Set the colors to match the theme
+        if theme == "default":
+            if axis == "X":
+                self.actor.GetProperty().SetColor(1, 0, 0)  # Red
+            elif axis == "Y":
+                self.actor.GetProperty().SetColor(0, 1, 0)  # Green
+            else:
+                self.actor.GetProperty().SetColor(0, 0, 1)  # Blue
+        elif theme == "print":
+            if axis == "X":
+                self.actor.GetProperty().SetColor(0.75, 0, 0)  # Dark Red
+            elif axis == "Y":
+                self.actor.GetProperty().SetColor(0, 0.75, 0)  # Dark Green
+            else:
+                self.actor.GetProperty().SetColor(0, 0, 0.75)  # Dark Blue
+
+        self.actor.SetMapper(mapper)
+
+
+def _RenderMemberCsys(model, renderer, theme, annotation_size=5):
+    
+    axis_length = annotation_size * 3
+
+    # Step through each member in the model
+    for member in model.members.values():
+
+        # Get the member local coordinate axes from the member transformation matrix
+        axes = member.T()[:3, :3]
+
+        # Plot each one as an arrow at the member center point
+        center_point = [
+            0.5 * (member.i_node.X + member.j_node.X),
+            0.5 * (member.i_node.Y + member.j_node.Y),
+            0.5 * (member.i_node.Z + member.j_node.Z),
+        ]
+
+        x_axis = VisLocalCsys(center_point, axes[0], axis_length, "X", theme)
+        renderer.AddActor(x_axis.actor)
+
+        y_axis = VisLocalCsys(center_point, axes[1], axis_length, "Y", theme)
+        renderer.AddActor(y_axis.actor)
+
+        z_axis = VisLocalCsys(center_point, axes[2], axis_length, "Z", theme)
+        renderer.AddActor(z_axis.actor)

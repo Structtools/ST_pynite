@@ -556,7 +556,7 @@ def test_rayleigh_quotient_returns_the_eigenvalues():
     _prepare_model(mesh, 4)
     _set_force_timoshenko(mesh, True)
     D1, D2i, _ = _partition_D(mesh)
-    K11 = _partition(mesh, mesh.K('Mass', sparse=True).tocsr(), D1, D2i)[0].toarray()
+    K11 = _partition(mesh, mesh.Ke('Mass', sparse=True).tocsr(), D1, D2i)[0].toarray()
 
     quotient = np.diag(results.mode_shapes.T @ K11 @ results.mode_shapes)
 

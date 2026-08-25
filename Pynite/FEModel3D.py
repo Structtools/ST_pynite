@@ -1,6 +1,7 @@
 # %%
 # `__future__` import required to use bar operators for optional type annotations
 from __future__ import annotations  # Allows more recent type hints features
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -55,8 +56,12 @@ class FEModel3D():
         self.mats: Dict[str, MatFoundation] = {}       # A dictionary of the model's mat foundations
         self.load_combos: Dict[str, LoadCombo] = {}    # A dictionary of the model's load combinations
         self._D: Dict[str, NDArray[float64]] = {}      # A dictionary of the model's nodal displacements by load combination
+        self._pushover_traces: Dict[str, Dict[str, List]] = {}
 
         self.solution: str | None = None  # Indicates the solution type for the latest run of the model
+
+    def __repr__(self) -> str:
+        return f"FEModel3D(solution={self.solution!r})"
 
     # Decorator marks this helper as not needing class/instance state.
     @staticmethod
@@ -1619,12 +1624,13 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
-    def K(self, combo_name='Combo 1', log=False, check_stability=True, sparse=True):
-        """Returns the model's global stiffness matrix. The stiffness matrix will be returned in
-           scipy's sparse coo format, which reduces memory usage and can be easily converted to
-           other formats.
+    def Ke(self, combo_name='Combo 1', log=False, check_stability=True, sparse=True):
+        """Returns the model's global elastic stiffness matrix.
 
-        :param combo_name: The load combination to get the stiffness matrix for. Defaults to 'Combo 1'.
+        The elastic stiffness matrix is returned in scipy's sparse COO format by default, which
+        reduces memory usage and can be easily converted to other formats.
+
+        :param combo_name: The load combination to get the elastic stiffness matrix for. Defaults to 'Combo 1'.
         :type combo_name: str, optional
         :param log: Prints updates to the console if set to True. Defaults to False.
         :type log: bool, optional
@@ -1634,7 +1640,7 @@ class FEModel3D():
         :param sparse: Returns a sparse matrix if set to True, and a dense matrix otherwise.
                        Defaults to True.
         :type sparse: bool, optional
-        :return: The global stiffness matrix for the structure.
+        :return: The global elastic stiffness matrix for the structure.
         :rtype: ndarray or coo_matrix
         """
 
@@ -1650,7 +1656,7 @@ class FEModel3D():
             data_parts: list[np.ndarray] = []
         else:
             # Initialize a dense matrix of zeros
-            K = np.zeros((len(self.nodes)*6, len(self.nodes)*6))
+            Ke = np.zeros((len(self.nodes)*6, len(self.nodes)*6))
 
         # Add stiffness terms for each nodal spring in the model
         if log: print('- Adding nodal spring support stiffness terms to global stiffness matrix')
@@ -1672,7 +1678,7 @@ class FEModel3D():
                         # Record the spring stiffness contribution for this DOF.
                         data_parts.append(np.array([val], dtype=float))
                     else:
-                        K[m, n] += val
+                        Ke[m, n] += val
 
             if node.spring_DY[0] is not None:
 
@@ -1689,7 +1695,7 @@ class FEModel3D():
                         # Store the spring stiffness coefficient for this DOF.
                         data_parts.append(np.array([val], dtype=float))
                     else:
-                        K[m, n] += val
+                        Ke[m, n] += val
 
             if node.spring_DZ[0] is not None:
 
@@ -1706,7 +1712,7 @@ class FEModel3D():
                         # Store the spring stiffness magnitude itself.
                         data_parts.append(np.array([val], dtype=float))
                     else:
-                        K[m, n] += val
+                        Ke[m, n] += val
 
             if node.spring_RX[0] is not None:
 
@@ -1723,7 +1729,7 @@ class FEModel3D():
                         # Store the rotational stiffness value for RX.
                         data_parts.append(np.array([val], dtype=float))
                     else:
-                        K[m, n] += val
+                        Ke[m, n] += val
 
             if node.spring_RY[0] is not None:
 
@@ -1740,7 +1746,7 @@ class FEModel3D():
                         # Store the rotational stiffness value for RY.
                         data_parts.append(np.array([val], dtype=float))
                     else:
-                        K[m, n] += val
+                        Ke[m, n] += val
 
             if node.spring_RZ[0] is not None:
 
@@ -1757,7 +1763,7 @@ class FEModel3D():
                         # Store the rotational stiffness value for RZ.
                         data_parts.append(np.array([val], dtype=float))
                     else:
-                        K[m, n] += val
+                        Ke[m, n] += val
 
         # Add stiffness terms for each spring in the model
         if log: print('- Adding spring stiffness terms to global stiffness matrix')
@@ -1770,14 +1776,14 @@ class FEModel3D():
                 # Capture the full set of i/j DOF indices for this spring element.
                 dofs = self._build_dof_vector(spring.i_node, spring.j_node)
                 # Grab the spring's already-transformed global stiffness matrix.
-                spring_K = spring.K()
+                spring_Ke = spring.Ke()
 
                 if sparse == True:
                     # Convert the spring block into sparse row/col/data pieces.
-                    self._append_sparse_block(dofs, spring_K, row_parts, col_parts, data_parts)
+                    self._append_sparse_block(dofs, spring_Ke, row_parts, col_parts, data_parts)
                 else:
                     # Add the spring block directly to the dense global matrix.
-                    self._add_dense_block(K, dofs, spring_K)
+                    self._add_dense_block(Ke, dofs, spring_Ke)
 
         # Add stiffness terms for each physical member in the model
         if log: print('- Adding member stiffness terms to global stiffness matrix')
@@ -1794,14 +1800,14 @@ class FEModel3D():
                     # Capture the member's i/j DOFs for subsequent block placement.
                     dofs = self._build_dof_vector(member.i_node, member.j_node)
                     # Grab the member's global stiffness matrix.
-                    member_K = member.K()
+                    member_Ke = member.Ke()
 
                     if sparse == True:
                         # Append the member block into the sparse assembly lists.
-                        self._append_sparse_block(dofs, member_K, row_parts, col_parts, data_parts)
+                        self._append_sparse_block(dofs, member_Ke, row_parts, col_parts, data_parts)
                     else:
                         # Inject the member block into the dense matrix via vectorized indexing.
-                        self._add_dense_block(K, dofs, member_K)
+                        self._add_dense_block(Ke, dofs, member_Ke)
 
         # Add stiffness terms for each quadrilateral in the model
         if log: print('- Adding quadrilateral stiffness terms to global stiffness matrix')
@@ -1809,7 +1815,7 @@ class FEModel3D():
 
             # Get the quadrilateral's global stiffness matrix
             # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-            quad_K = quad.K()
+            quad_Ke = quad.Ke()
             # Four nodes -> 24 DOFs. The helper keeps those indices contiguous so the
             # full block can be added without manual bookkeeping.
             # Build the 24-entry DOF vector for the quadrilateral element.
@@ -1817,10 +1823,10 @@ class FEModel3D():
 
             if sparse == True:
                 # Append the quad block contributions to the sparse assembly lists.
-                self._append_sparse_block(dofs, quad_K, row_parts, col_parts, data_parts)
+                self._append_sparse_block(dofs, quad_Ke, row_parts, col_parts, data_parts)
             else:
                 # Add the quad block directly to the dense matrix.
-                self._add_dense_block(K, dofs, quad_K)
+                self._add_dense_block(Ke, dofs, quad_Ke)
 
         # Add stiffness terms for each plate in the model
         if log: print('- Adding plate stiffness terms to global stiffness matrix')
@@ -1828,17 +1834,17 @@ class FEModel3D():
 
             # Get the plate's global stiffness matrix
             # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-            plate_K = plate.K()
+            plate_Ke = plate.Ke()
             # Same concept as the quad above, but for the rectangular plate element.
             # Build the DOF vector for the plate's four nodes.
             dofs = self._build_dof_vector(plate.i_node, plate.j_node, plate.m_node, plate.n_node)
 
             if sparse == True:
                 # Append the plate block contributions to the sparse assembly lists.
-                self._append_sparse_block(dofs, plate_K, row_parts, col_parts, data_parts)
+                self._append_sparse_block(dofs, plate_Ke, row_parts, col_parts, data_parts)
             else:
                 # Add the plate block directly to the dense matrix.
-                self._add_dense_block(K, dofs, plate_K)
+                self._add_dense_block(Ke, dofs, plate_Ke)
 
         if sparse:
             # Concatenate the per-element contributions into the vectors scipy expects.
@@ -1858,16 +1864,16 @@ class FEModel3D():
                 data = np.array([], dtype=float)
 
             # Build the sparse COO matrix from the assembled vectors.
-            K = sp.sparse.coo_matrix((data, (row, col)), shape=(len(self.nodes)*6, len(self.nodes)*6))
+            Ke = sp.sparse.coo_matrix((data, (row, col)), shape=(len(self.nodes)*6, len(self.nodes)*6))
 
         # Check that there are no nodal instabilities
         if check_stability:
             if log: print('- Checking nodal stability')
-            if sparse: Analysis._check_stability(self, K.tocsr())
-            else: Analysis._check_stability(self, K)
+            if sparse: Analysis._check_stability(self, Ke.tocsr())
+            else: Analysis._check_stability(self, Ke)
 
-        # Return the global stiffness matrix
-        return K
+        # Return the global elastic stiffness matrix
+        return Ke
 
     def Kg(self, combo_name='Combo 1', log=False, sparse=True, first_step=True):
         """Returns the model's global geometric stiffness matrix. Geometric stiffness of plates is not considered.
@@ -1911,9 +1917,13 @@ class FEModel3D():
                         # For the first load step take P = 0
                         P = 0
                     else:
-                        # Calculate the member axial force due to axial strain
-                        d = member.d(combo_name)
-                        P = E*A/L*(d[6, 0] - d[0, 0])
+                        if self.solution == 'Pushover':
+                            # Use the axial force at the current nonlinear/inelastic load step
+                            P = member.f_nonlin[combo_name][6] - member.f_nonlin[combo_name][0]
+                        else:
+                            # Calculate the member axial force due to linear/elastic axial strain
+                            d = member.d(combo_name)
+                            P = E*A/L*(d[6, 0] - d[0, 0])
 
                     # Get the member's global stiffness matrix
                     # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
@@ -2345,10 +2355,6 @@ class FEModel3D():
             print('| Analyzing: Linear |')
             print('+-------------------+')
 
-        # Import `scipy` features if the sparse solver is being used
-        if sparse == True:
-            from scipy.sparse.linalg import spsolve
-
         # Prepare the model for analysis
         Analysis._prepare_model(self)
 
@@ -2359,9 +2365,9 @@ class FEModel3D():
         # Note that for linear analysis the stiffness matrix can be obtained for any load combination, as it's the same for all of them
         combo_name = list(self.load_combos.keys())[0]
         if sparse == True:
-            K11, K12, K21, K22 = Analysis._partition(self, self.K(combo_name, log, check_stability, sparse).tocsr(), D1_indices, D2_indices)
+            K11, K12, K21, K22 = Analysis._partition(self, self.Ke(combo_name, log, check_stability, sparse).tocsr(), D1_indices, D2_indices)
         else:
-            K11, K12, K21, K22 = Analysis._partition(self, self.K(combo_name, log, check_stability, sparse), D1_indices, D2_indices)
+            K11, K12, K21, K22 = Analysis._partition(self, self.Ke(combo_name, log, check_stability, sparse), D1_indices, D2_indices)
 
         # Identify which load combinations have the tags the user has given
         combo_list = Analysis._identify_combos(self, combo_tags)
@@ -2386,19 +2392,15 @@ class FEModel3D():
                 # All displacements are known, so D1 is an empty vector
                 D1 = []
             else:
-                try:
-                    # Calculate the unknown displacements D1
-                    if sparse == True:
-                        # The partitioned stiffness matrix originates as `coo` and is converted
-                        # to `csr` format for mathematical operations. The `@` operator performs
-                        # matrix multiplication on sparse matrices.
-                        D1 = spsolve(K11.tocsr(), np.subtract(np.subtract(P1, FER1), K12.tocsr() @ D2))
-                        D1 = D1.reshape(len(D1), 1)
-                    else:
-                        D1 = solve(K11, np.subtract(np.subtract(P1, FER1), np.matmul(K12, D2)))
-                except:
-                    # Return out of the method if 'K' is singular and provide an error message
-                    raise Exception('The stiffness matrix is singular, which implies rigid body motion. The structure is unstable. Aborting analysis.')
+                # Calculate the unknown displacements D1. The partitioned stiffness matrix
+                # originates as `coo` and is converted to `csr`/`csc` for mathematical
+                # operations. `_solve_unknown_disp` also detects global instability (a singular
+                # matrix) that the bare solvers can silently miss.
+                if sparse == True:
+                    rhs = np.subtract(np.subtract(P1, FER1), K12.tocsr() @ D2)
+                else:
+                    rhs = np.subtract(np.subtract(P1, FER1), np.matmul(K12, D2))
+                D1 = Analysis._solve_unknown_disp(K11, rhs, sparse, check_stability)
 
             # Store the calculated displacements to the model and the nodes in the model
             Analysis._store_displacements(self, D1, D2, D1_indices, D2_indices, combo)
@@ -2477,83 +2479,13 @@ class FEModel3D():
             # Get the partitioned total global fixed end reaction vector
             FER1, FER2 = Analysis._partition(self, self.FER(combo.name), D1_indices, D2_indices)
 
-            # Calculate the incremental global fixed end reaction vector
-            Delta_FER1 = FER1/num_steps
-
             # Get the partitioned total global nodal force vector
             P1, P2 = Analysis._partition(self, self.P(combo.name), D1_indices, D2_indices)
 
-            # Calculate the incremental global nodal force vector
-            Delta_P1 = P1/num_steps
-
-            # Apply the load incrementally
-            load_step = 1
-            while load_step <= num_steps:
-
-                # Keep track of the number of iterations in this load step
-                iter_count = 1
-                convergence = False
-                divergence = False
-
-                # Iterate until convergence or divergence occurs
-                while convergence == False and divergence == False:
-
-                    # Check for tension/compression-only divergence
-                    if iter_count > max_iter:
-                        divergence = True
-                        raise Exception('Model diverged during tension/compression-only analysis')
-
-                    # Report which load step we are on
-                    if log:
-                        print(f'- Analyzing load step #{str(load_step)}')
-
-                    # Get the partitioned global stiffness matrix K11, K12, K21, K22
-                    if sparse == True:
-                        K11, K12, K21, K22 = Analysis._partition(self, self.K(combo.name, log, check_stability, sparse).tocsr(), D1_indices, D2_indices)
-                    else:
-                        K11, K12, K21, K22 = Analysis._partition(self, self.K(combo.name, log, check_stability, sparse), D1_indices, D2_indices)
-
-                    if K11.shape == (0, 0):
-                        # All displacements are known, so Delta_D1 is an empty vector
-                        Delta_D1 = []
-                    else:
-                        try:
-                            # Calculate the unknown displacements Delta_D1
-                            if sparse == True:
-                                # The partitioned stiffness matrix originates as `coo` and is converted to `csr`
-                                # format for mathematical operations. The `@` operator performs matrix multiplication
-                                # on sparse matrices.
-                                Delta_D1 = spsolve(K11, np.subtract(np.subtract(Delta_P1, Delta_FER1), K12 @ Delta_D2))
-                                Delta_D1 = Delta_D1.reshape(len(Delta_D1), 1)
-                            else:
-                                Delta_D1 = solve(K11, np.subtract(np.subtract(Delta_P1, Delta_FER1), np.matmul(K12, Delta_D2)))
-                        except:
-                            # Return out of the method if 'K' is singular and provide an error message
-                            raise Exception('The stiffness matrix is singular, which implies rigid body motion. The structure is unstable. Aborting analysis.')
-
-                    # Store or sum the calculated displacements to the model and the nodes in the model
-                    if load_step == 1:
-                        Analysis._store_displacements(self, Delta_D1, Delta_D2, D1_indices, D2_indices, combo)
-                    else:
-                        Analysis._sum_displacements(self, Delta_D1, Delta_D2, D1_indices, D2_indices, combo)
-
-                    # Check for tension/compression-only convergence at this load step
-                    convergence = Analysis._check_TC_convergence(self, combo.name, log=log, spring_tolerance=spring_tolerance, member_tolerance=member_tolerance)
-
-                    if convergence == False:
-
-                        if log:
-                            print(f'- Undoing load step #{load_step} due to failed convergence.')
-
-                        # Undo the latest analysis step to prepare for re-analysis of the load step
-                        Analysis._sum_displacements(self, -Delta_D1, -Delta_D2, D1_indices, D2_indices, combo)
-
-                    else:
-                        # Move on to the next load step
-                        load_step += 1
-
-                    # Keep track of the number of tension/compression only iterations
-                    iter_count += 1
+            # Run the shared first-order solution path for this load combination
+            Analysis._first_order(self, combo.name, P1, FER1, D1_indices, D2_indices, D2,
+                                  log, sparse, check_stability, max_iter,
+                                  spring_tolerance, member_tolerance, num_steps)
 
         # Calculate reactions
         Analysis._calc_reactions(self, log, combo_tags)
@@ -2566,9 +2498,6 @@ class FEModel3D():
         # Check statics if requested
         if check_statics == True:
             Analysis._check_statics(self, combo_tags)
-
-        # Flag the model as solved
-        self.solution = 'Nonlinear TC'
 
     def analyze_PDelta(self, log=False, check_stability=True, max_iter=30, sparse=True, combo_tags=None):
         """Performs second order (P-Delta) analysis. This type of analysis is appropriate for most models using beams, columns and braces. Second order analysis is usually required by material specific codes. The analysis is iterative and takes longer to solve. Models with slender members and/or members with combined bending and axial loads will generally have more significant P-Delta effects. P-Delta effects in plates/quads are not considered.
@@ -2946,10 +2875,10 @@ class FEModel3D():
             print('- Assembling global stiffness matrix')
 
         # Assemble and partition the global stiffness matrix
-        K_global = self.K(mass_combo_name, log, check_stability, sparse=True).tocsr()
+        Ke_global = self.Ke(mass_combo_name, log, check_stability, sparse=True).tocsr()
 
         # Partition to remove supported DOFs
-        K11, K12, K21, K22 = Analysis._partition(self, K_global, D1_indices, D2_indices)
+        K11, K12, K21, K22 = Analysis._partition(self, Ke_global, D1_indices, D2_indices)
 
         if log:
             print('- Assembling global mass matrix')
@@ -3400,7 +3329,146 @@ class FEModel3D():
 
         return self._buckling_results
 
-    def _not_ready_yet_analyze_pushover(self, log=False, check_stability=True, push_combo='Push', max_iter=30, tol=0.01, sparse=True, combo_tags=None):
+# %%
+    # Pushover results/query methods live with the pushover solver for locality.
+    def get_pushover_trace(self, combo_name, trace_name):
+        """Returns the recorded history for a named pushover trace."""
+
+        return self._pushover_traces[combo_name][trace_name]
+
+    def plot_pushover_trace(self, trace_name, combo_name=None, combo_names=None, ax=None, filepath=None, dpi=150):
+        """Plots and saves a pushover trace by accepted step number for one load combo or an envelope."""
+
+        import matplotlib.pyplot as plt
+
+        if combo_name is None and combo_names is None:
+            raise ValueError('Either combo_name or combo_names must be specified for pushover trace plotting.')
+
+        if combo_name is not None and combo_names is not None:
+            raise ValueError('Specify either combo_name or combo_names, but not both.')
+
+        created_axes = ax is None
+
+        if ax is None:
+            fig, ax = plt.subplots()
+        else:
+            fig = ax.figure
+
+        if combo_name is not None:
+            trace = self.get_pushover_trace(combo_name, trace_name)
+            steps = list(range(1, len(trace) + 1))
+
+            ax.plot(steps, trace, linewidth=2, label=combo_name)
+            title = f'{trace_name} - {combo_name}'
+            default_name = f'{trace_name}_{combo_name}_pushover_trace.png'
+
+        else:
+            combo_names = list(combo_names)
+            if not combo_names:
+                raise ValueError('combo_names must contain at least one load combination name.')
+
+            max_steps = max(len(self.get_pushover_trace(name, trace_name)) for name in combo_names)
+            steps = []
+            lower = []
+            upper = []
+
+            for step_index in range(max_steps):
+                values = []
+
+                for name in combo_names:
+                    trace = self.get_pushover_trace(name, trace_name)
+                    if step_index < len(trace):
+                        values.append(trace[step_index])
+
+                if values:
+                    steps.append(step_index + 1)
+                    lower.append(min(values))
+                    upper.append(max(values))
+
+            ax.plot(steps, lower, linewidth=1.5, linestyle='--', label='Envelope min')
+            ax.plot(steps, upper, linewidth=1.5, label='Envelope max')
+            ax.fill_between(steps, lower, upper, alpha=0.2)
+            title = f'{trace_name} envelope'
+            default_name = f'{trace_name}_pushover_trace_envelope.png'
+
+        ax.set_xlabel('Step Number')
+        ax.set_ylabel(trace_name)
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        if filepath is None:
+            save_path = Path.cwd()/default_name
+        else:
+            save_path = Path(filepath)
+
+        save_path = save_path.resolve()
+        fig.tight_layout()
+        fig.savefig(save_path, dpi=dpi)
+
+        if created_axes:
+            plt.show()
+
+        return fig, ax, save_path
+
+    def analyze_pushover(self, log=False, check_stability=True, push_combo='Push', max_iter=30, tol=0.01, sparse=True, combo_tags=None, control_node=None, control_direction='DX', control_limit=None, traces=None, P_Delta=False):
+        """Performs a pushover analysis with optional second-order P-Delta effects.
+
+        By default, the initial preload state is established using first-order analysis and the
+        incremental pushover steps omit the geometric stiffness matrix. Set ``P_Delta=True`` to
+        opt into second-order behavior for both the preload and the subsequent pushover steps.
+
+        :param log: Prints updates to the console if set to True. Default is False.
+        :type log: bool, optional
+        :param check_stability: Checks the stiffness matrix for unstable degrees of freedom when
+                                set to True. Defaults to True.
+        :type check_stability: bool, optional
+        :param push_combo: The load combination containing the pushover increment. Defaults to 'Push'.
+        :type push_combo: str, optional
+        :param max_iter: The maximum number of iterations permitted for the preload solver and
+                 the maximum number of retries permitted for each pushover load step.
+                 Defaults to 30.
+        :type max_iter: int, optional
+        :param tol: Convergence tolerance for pushover step validation checks. Defaults to 0.01.
+        :type tol: float, optional
+        :param sparse: Indicates whether the sparse solver should be used. Defaults to True.
+        :type sparse: bool, optional
+        :param combo_tags: Tags used to select which primary load combinations to run.
+        :type combo_tags: list[str] | None, optional
+        :param control_node: Optional node used to stop the pushover once a target displacement is reached.
+        :type control_node: str | None, optional
+        :param control_direction: Degree of freedom to monitor at the control node.
+        :type control_direction: str, optional
+        :param control_limit: Optional displacement/rotation limit at the control node.
+        :type control_limit: float | None, optional
+        :param traces: Optional dictionary of trace names mapped to callables that accept combo_name.
+        :type traces: dict | None, optional
+        :param P_Delta: Set to True to include geometric stiffness and second-order effects during
+                pushover analysis. Defaults to False.
+        :type P_Delta: bool, optional
+        """
+
+        if control_limit is not None and control_node is None:
+            raise ValueError('A control node must be specified when a pushover control limit is provided.')
+
+        if control_direction.upper() not in ('DX', 'DY', 'DZ', 'RX', 'RY', 'RZ'):
+            raise ValueError("Pushover control direction must be one of 'DX', 'DY', 'DZ', 'RX', 'RY', or 'RZ'.")
+
+        if max_iter < 1:
+            raise ValueError('max_iter must be at least 1 for pushover analysis.')
+
+        if control_node is not None and control_node not in self.nodes:
+            raise ValueError(f"Control node '{control_node}' was not found in the model.")
+
+        if traces is not None:
+            if not isinstance(traces, dict):
+                raise ValueError('Pushover traces must be provided as a dictionary of trace names to callables.')
+
+            for trace_name, trace in traces.items():
+                if not callable(trace):
+                    raise ValueError(
+                        f"Pushover trace '{trace_name}' is not callable. Wrap expressions in a lambda or function that accepts combo_name."
+                    )
 
         if log:
             print('+---------------------+')
@@ -3426,26 +3494,26 @@ class FEModel3D():
                     combo.combo_tags.append('primary')
 
         # Identify which load combinations have the tags the user has given
-        # TODO: Remove the pushover combo istelf from `combo_list`
         combo_list = Analysis._identify_combos(self, combo_tags)
         combo_list = [combo for combo in combo_list if combo.name != push_combo]
 
+        # Initialize per-combo pushover result state.
+        self._pushover_state = {}
+        self._pushover_traces = {}
+        self._pushover_P_Delta = P_Delta
+
         # Step through each load combination
         for combo in combo_list:
-
-            # Skip the pushover combo
-            if combo.name == push_combo:
-                continue
 
             if log:
                 print('')
                 print('- Analyzing load combination ' + combo.name)
 
-            # Reset nonlinear material member end forces to zero
+            # Member end forces will be summed across multiple load steps
+            # Set member end force summations to zero
             for phys_member in self.members.values():
                 for sub_member in phys_member.sub_members.values():
-                    sub_member._fxi, sub_member._myi, sub_member._mzi = 0, 0, 0
-                    sub_member._fxj, sub_member._myj, sub_member._mzj = 0, 0, 0
+                    sub_member.f_nonlin = {}
 
             # Get the partitioned global fixed end reaction vector for the load combination
             FER1, FER2 = Analysis._partition(self, self.FER(combo.name), D1_indices, D2_indices)
@@ -3453,23 +3521,59 @@ class FEModel3D():
             # Get the partitioned global nodal force vector for the load combination
             P1, P2 = Analysis._partition(self, self.P(combo.name), D1_indices, D2_indices)
 
-            # Run an elastic P-Delta analysis for the load combination (w/o pushover loads)
-            # This will be used to preload the member with non-pushover loads prior to pushover anlaysis
-            Analysis._PDelta(self, combo.name, P1, FER1, D1_indices, D2_indices, D2, False, sparse, check_stability, 30)
+            # Preload the primary load combination before any pushover increments are applied.
+            # By default, pushover uses the first-order analysis path. Set `P_Delta=True` to opt
+            # into a second-order preload state.
+            if log:
+                print('- Preloading the primary combination using ' + ('P-Delta' if P_Delta else 'first-order') + ' analysis')
 
-            # The previous step flagged the solution as a P-Delta solution, but we need to indicate that this is actually a Pushover solution so that the calls to Member3D.f() are excecuted considering nonlinear behavior
+            if P_Delta:
+                Analysis._PDelta(self, combo.name, P1, FER1, D1_indices, D2_indices, D2, False, sparse, check_stability, max_iter)
+            else:
+                Analysis._first_order(self, combo.name, P1, FER1, D1_indices, D2_indices, D2, False, sparse, check_stability, max_iter)
+
+            # Seed the nonlinear end-force history with the elastic preload state from the
+            # primary load combination before any pushover increments are applied.
+            for phys_member in self.members.values():
+                for sub_member in phys_member.sub_members.values():
+                    f = sub_member.f(combo.name)
+                    sub_member.f_nonlin[combo.name] = f.reshape(12)
+
+            # The P-Delta analysis above flagged the solution as a P-Delta solution, but we need to
+            # indicate that this is actually a Pushover solution so that the calls to Member3D.f()
+            # or Member3D._fer_unc() going forward are executed considering nonlinear behavior
             self.solution = 'Pushover'
 
-            # Get the partitioned global fixed end reaction vector for a pushover load increment
+            # Define the pushover load step and initialize the pushover load factor
+            load_step = list(self.load_combos[push_combo].factors.values())[0]
+            step_num = 1
+            load_factor = load_step*step_num
+
+            # Get the partitioned global fixed end reaction vector for one pushover increment.
+            # The pushover combo factor already defines the increment size.
             FER1_push, FER2_push = Analysis._partition(self, self.FER(push_combo), D1_indices, D2_indices)
 
-            # Get the partitioned global nodal force vector for a pushover load increment
+            # Get the partitioned global nodal force vector for one pushover increment.
             P1_push, P2_push = Analysis._partition(self, self.P(push_combo), D1_indices, D2_indices)
 
-            # Get the pushover load step and initialize the load factor
-            load_step = list(self.load_combos[push_combo].factors.values())[0]  # TODO: This line can probably live outside the loop
-            load_factor = load_step
-            step_num = 1
+            self._pushover_traces[combo.name] = {
+                trace_name: [] for trace_name in (traces or {})
+            }
+
+            # Initialize the pushover state for this load combination, which will be updated at
+            # each load step and can be queried for results during or after the pushover analysis.
+            self._pushover_state[combo.name] = {
+                'push_combo': push_combo,
+                'P_Delta': P_Delta,
+                'status': 'running',
+                'step_num': 0,
+                'load_factor': 0.0,
+                'control_node': control_node,
+                'control_direction': control_direction.upper(),
+                'control_limit': control_limit,
+                'control_displacement': None,
+                'message': None,
+            }
 
             # Apply the pushover load in steps, summing deformations as we go, until the full pushover load has been analyzed
             while round(load_factor, 8) <= 1.0:
@@ -3480,27 +3584,53 @@ class FEModel3D():
                     print(f'- Load_factor = {load_factor}')
 
                 # Run the next pushover load step
-                Analysis._pushover_step(self, combo.name, push_combo, step_num, P1_push, FER1_push, D1_indices, D2_indices, D2, log, sparse, check_stability)
+                # Note: The validity of the pushover step is checked and handled within the _pushover_step method
+                Analysis._pushover_step(self, combo.name, push_combo, step_num, P1_push, FER1_push, FER2_push, D1_indices, D2_indices, D2, log, sparse, check_stability, tol, P_Delta, max_iter)
 
-                # Update nonlinear material member end forces for each member
-                for phys_member in self.members.values():
+                control_displacement = None
+                if control_node is not None:
+                    node = self.nodes[control_node]
+                    control_displacement = float(getattr(node, control_direction.upper())[combo.name])
 
-                    for member in phys_member.sub_members.values():
+                if traces is not None:
+                    for trace_name, trace in traces.items():
+                        try:
+                            self._pushover_traces[combo.name][trace_name].append(trace(combo.name))
+                        except Exception as exc:
+                            raise RuntimeError(
+                                f"Error evaluating pushover trace '{trace_name}' for load combination '{combo.name}'."
+                            ) from exc
 
-                        # Calculate the local member end force vector (once)
-                        f = member.f(combo.name, push_combo, step_num)
+                self._pushover_state[combo.name].update({
+                    'step_num': step_num,
+                    'load_factor': load_factor,
+                    'control_displacement': control_displacement,
+                })
 
-                        # Store the end forces in the member
-                        member._fxi = f[0, 0]
-                        member._myi = f[4, 0]
-                        member._mzi = f[5, 0]
-                        member._fxj = f[6, 0]
-                        member._myj = f[10, 0]
-                        member._mzj = f[11, 0]
+                if control_limit is not None and control_displacement is not None and abs(control_displacement) >= abs(control_limit):
+                    self._pushover_state[combo.name].update({
+                        'status': 'target_displacement_reached',
+                        'message': (
+                            f"Stopped pushover at step {step_num} for load combination '{combo.name}' "
+                            f"because {control_direction.upper()} at node '{control_node}' reached "
+                            f"{control_displacement:.6g}, exceeding the specified limit of {control_limit:.6g}."
+                        ),
+                    })
+
+                    if log:
+                        print(f"- {self._pushover_state[combo.name]['message']}")
+
+                    break
 
                 # Move on to the next load step
                 step_num += 1
                 load_factor += load_step
+
+            if self._pushover_state[combo.name]['status'] == 'running':
+                self._pushover_state[combo.name].update({
+                    'status': 'completed',
+                    'message': 'Full pushover load applied.',
+                })
 
         # Calculate reactions for every primary load combination
         Analysis._calc_reactions(self, log, combo_tags=['primary'])
@@ -3510,9 +3640,7 @@ class FEModel3D():
             print('- Analysis complete')
             print('')
 
-        # Flag the model as solved
-        self.solution = 'Pushover'
-
+# %%
     def unique_name(self, dictionary, prefix):
         """Returns the next available unique name for a dictionary of objects.
 

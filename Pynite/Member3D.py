@@ -81,13 +81,10 @@ class Member3D():
         except KeyError:
             raise NameError(f"No section names '{section_name}'")
 
-        # Variables used to track nonlinear material member end forces
-        self._fxi: float = 0
-        self._myi: float = 0
-        self._mzi: float = 0
-        self._fxj: float = 0
-        self._myj: float = 0
-        self._mzj: float = 0
+        # Nonlinear local end-force history by load combo.
+        # DOF order: [fxi, fyi, fzi, mxi, myi, mzi, fxj, fyj, fzj, mxj, myj, mzj]
+        self.f_nonlin: dict = {}
+        self.df_nonlin: dict = {}  # Variable used to track the change in the local end force vector for nonlinear load steps
 
         # Variable used to track plastic load reveral
         self.i_reversal: bool = False
@@ -119,6 +116,10 @@ class Member3D():
         """Whether to include shear deformation (Timoshenko) in stiffness calculations.
         Returns True when beam_type is 'timoshenko' or when forced for eigenvalue analysis."""
         return self.beam_type == 'timoshenko' or self._force_timoshenko
+
+# %%
+    def __repr__(self) -> str:
+        return f"Member3D(name={self.name!r}, i_node={self.i_node.name!r}, j_node={self.j_node.name!r})"
 
 # %%
     def L(self) -> float:
@@ -156,40 +157,40 @@ class Member3D():
         return R1_indices, R2_indices
 
 # %%
-    def k(self) -> NDArray[Any]:
+    def ke(self) -> NDArray[Any]:
         """
-        Returns the condensed (and expanded) local stiffness matrix for the member.
+        Returns the condensed (and expanded) local elastic stiffness matrix for the member.
 
-        :return: The condensed local stiffness matrix
+        :return: The condensed local elastic stiffness matrix
         :rtype: ndarray
         """
 
         # Partition the local stiffness matrix as 4 submatrices in
         # preparation for static condensation
-        k11, k12, k21, k22 = self._partition(self._k_unc())
+        ke11, ke12, ke21, ke22 = self._partition(self._ke_unc())
 
         # Calculate the condensed local stiffness matrix
-        k_Condensed = subtract(k11, matmul(matmul(k12, inv(k22)), k21))
+        ke_condensed = subtract(ke11, matmul(matmul(ke12, inv(ke22)), ke21))
 
         # Expand the condensed local stiffness matrix
         i = 0
         for DOF in self.Releases:
 
             if DOF == True:
-                k_Condensed = insert(k_Condensed, i, 0, axis=0)
-                k_Condensed = insert(k_Condensed, i, 0, axis=1)
+                ke_condensed = insert(ke_condensed, i, 0, axis=0)
+                ke_condensed = insert(ke_condensed, i, 0, axis=1)
 
             i += 1
 
         # Return the local stiffness matrix, with end releases applied
-        return k_Condensed
+        return ke_condensed
 
 # %%
-    def _k_unc(self) -> NDArray[float64]:
+    def _ke_unc(self) -> NDArray[float64]:
         """
-        Returns the uncondensed local stiffness matrix for the member.
+        Returns the uncondensed local elastic stiffness matrix for the member.
 
-        :return: The uncondensed local stiffness matrix
+        :return: The uncondensed local elastic stiffness matrix
         :rtype: NDArray[float64]
         """
 
@@ -215,21 +216,21 @@ class Member3D():
             Phi_z = 0.0
 
         # Create the uncondensed local stiffness matrix (Timoshenko beam)
-        k = array([[A*E/L,  0,                            0,                            0,      0,                            0,                            -A*E/L, 0,                             0,                            0,      0,                            0                            ],
-                   [0,      12*E*Iz/(L**3*(1+Phi_z)),     0,                            0,      0,                            6*E*Iz/(L**2*(1+Phi_z)),      0,      -12*E*Iz/(L**3*(1+Phi_z)),     0,                            0,      0,                            6*E*Iz/(L**2*(1+Phi_z))      ],
-                   [0,      0,                            12*E*Iy/(L**3*(1+Phi_y)),     0,      -6*E*Iy/(L**2*(1+Phi_y)),     0,                            0,      0,                             -12*E*Iy/(L**3*(1+Phi_y)),    0,      -6*E*Iy/(L**2*(1+Phi_y)),     0                            ],
-                   [0,      0,                            0,                            G*J/L,  0,                            0,                            0,      0,                             0,                            -G*J/L, 0,                            0                            ],
-                   [0,      0,                            -6*E*Iy/(L**2*(1+Phi_y)),     0,      (4+Phi_y)*E*Iy/(L*(1+Phi_y)), 0,                            0,      0,                             6*E*Iy/(L**2*(1+Phi_y)),      0,      (2-Phi_y)*E*Iy/(L*(1+Phi_y)), 0                            ],
-                   [0,      6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (4+Phi_z)*E*Iz/(L*(1+Phi_z)), 0,      -6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (2-Phi_z)*E*Iz/(L*(1+Phi_z)) ],
-                   [-A*E/L, 0,                            0,                            0,      0,                            0,                            A*E/L,  0,                             0,                            0,      0,                            0                            ],
-                   [0,      -12*E*Iz/(L**3*(1+Phi_z)),    0,                            0,      0,                            -6*E*Iz/(L**2*(1+Phi_z)),     0,      12*E*Iz/(L**3*(1+Phi_z)),      0,                            0,      0,                            -6*E*Iz/(L**2*(1+Phi_z))     ],
-                   [0,      0,                            -12*E*Iy/(L**3*(1+Phi_y)),    0,      6*E*Iy/(L**2*(1+Phi_y)),      0,                            0,      0,                             12*E*Iy/(L**3*(1+Phi_y)),     0,      6*E*Iy/(L**2*(1+Phi_y)),      0                            ],
-                   [0,      0,                            0,                            -G*J/L, 0,                            0,                            0,      0,                             0,                            G*J/L,  0,                            0                            ],
-                   [0,      0,                            -6*E*Iy/(L**2*(1+Phi_y)),     0,      (2-Phi_y)*E*Iy/(L*(1+Phi_y)), 0,                            0,      0,                             6*E*Iy/(L**2*(1+Phi_y)),      0,      (4+Phi_y)*E*Iy/(L*(1+Phi_y)), 0                            ],
-                   [0,      6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (2-Phi_z)*E*Iz/(L*(1+Phi_z)), 0,      -6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (4+Phi_z)*E*Iz/(L*(1+Phi_z)) ]])
+        ke = array([[A*E/L,  0,                            0,                            0,      0,                            0,                            -A*E/L, 0,                             0,                            0,      0,                            0                            ],
+                    [0,      12*E*Iz/(L**3*(1+Phi_z)),     0,                            0,      0,                            6*E*Iz/(L**2*(1+Phi_z)),      0,      -12*E*Iz/(L**3*(1+Phi_z)),     0,                            0,      0,                            6*E*Iz/(L**2*(1+Phi_z))      ],
+                    [0,      0,                            12*E*Iy/(L**3*(1+Phi_y)),     0,      -6*E*Iy/(L**2*(1+Phi_y)),     0,                            0,      0,                             -12*E*Iy/(L**3*(1+Phi_y)),    0,      -6*E*Iy/(L**2*(1+Phi_y)),     0                            ],
+                    [0,      0,                            0,                            G*J/L,  0,                            0,                            0,      0,                             0,                            -G*J/L, 0,                            0                            ],
+                    [0,      0,                            -6*E*Iy/(L**2*(1+Phi_y)),     0,      (4+Phi_y)*E*Iy/(L*(1+Phi_y)), 0,                            0,      0,                             6*E*Iy/(L**2*(1+Phi_y)),      0,      (2-Phi_y)*E*Iy/(L*(1+Phi_y)), 0                            ],
+                    [0,      6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (4+Phi_z)*E*Iz/(L*(1+Phi_z)), 0,      -6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (2-Phi_z)*E*Iz/(L*(1+Phi_z)) ],
+                    [-A*E/L, 0,                            0,                            0,      0,                            0,                            A*E/L,  0,                             0,                            0,      0,                            0                            ],
+                    [0,      -12*E*Iz/(L**3*(1+Phi_z)),    0,                            0,      0,                            -6*E*Iz/(L**2*(1+Phi_z)),     0,      12*E*Iz/(L**3*(1+Phi_z)),      0,                            0,      0,                            -6*E*Iz/(L**2*(1+Phi_z))     ],
+                    [0,      0,                            -12*E*Iy/(L**3*(1+Phi_y)),    0,      6*E*Iy/(L**2*(1+Phi_y)),      0,                            0,      0,                             12*E*Iy/(L**3*(1+Phi_y)),     0,      6*E*Iy/(L**2*(1+Phi_y)),      0                            ],
+                    [0,      0,                            0,                            -G*J/L, 0,                            0,                            0,      0,                             0,                            G*J/L,  0,                            0                            ],
+                    [0,      0,                            -6*E*Iy/(L**2*(1+Phi_y)),     0,      (2-Phi_y)*E*Iy/(L*(1+Phi_y)), 0,                            0,      0,                             6*E*Iy/(L**2*(1+Phi_y)),      0,      (4+Phi_y)*E*Iy/(L*(1+Phi_y)), 0                            ],
+                    [0,      6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (2-Phi_z)*E*Iz/(L*(1+Phi_z)), 0,      -6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (4+Phi_z)*E*Iz/(L*(1+Phi_z)) ]])
 
         # Return the uncondensed local stiffness matrix
-        return k
+        return ke
 
     def kg(self, P: float = 0) -> NDArray[float64]:
         """
@@ -303,16 +304,22 @@ class Member3D():
 
         # Get the elastic local stiffness matrix (for only axial and bending)
         # Note that using the entire stiffness matrix with all terms would lead to an uninvertible term later on
-        ke = self.k()  # [dofs][:, dofs]
+        ke = self.ke()  # [dofs][:, dofs]
 
-        # Get the member's axial force
-        P = self._fxi
+        # Get the member's axial force for the requested load combination (based on the latest load step).
+        P = self.f_nonlin[combo_name][6] - self.f_nonlin[combo_name][0]
 
-        # Get the geometric local stiffness matrix (for only axial and bending)
-        kg = self.kg(P)  # [dofs][:, dofs]
-
-        # Get the total elastic local stiffness matrix
-        ke = add(ke, kg)
+        # Get the total elastic local stiffness matrix, including geometric effects only when
+        # the active solution path has second-order behavior enabled.
+        if self.model.solution == 'P-Delta':
+            keg = add(ke, self.kg(P))
+        elif self.model.solution == 'Pushover':
+            if getattr(self.model, '_pushover_P_Delta', False):
+                keg = add(ke, self.kg(P))
+            else:
+                keg = ke
+        else:
+            keg = ke
 
         # Get the gradient to the failure surface at at each end of the element
         if self.section is None:
@@ -324,14 +331,20 @@ class Member3D():
                 # Gi is a null vector if load reversal is occuring
                 Gi = zeros((6, 1))
             else:
-                Gi = self.section.G(self._fxi, self._myi, self._mzi)
+                fxi = self.f_nonlin[combo_name][0]
+                myi = self.f_nonlin[combo_name][4]
+                mzi = self.f_nonlin[combo_name][5]
+                Gi = self.section.G(fxi, myi, mzi)
 
             # Check for load reversal at the j-node
             if self.j_reversal == True:
                 # Gj is a null vector if load reversal is occuring
                 Gj = zeros((6, 1))
             else:
-                Gj = self.section.G(self._fxj, self._myj, self._mzj)
+                fxj = self.f_nonlin[combo_name][6]
+                myj = self.f_nonlin[combo_name][10]
+                mzj = self.f_nonlin[combo_name][11]
+                Gj = self.section.G(fxj, myj, mzj)
 
         # Combine the gradients at the i and j-nodes
         zeros_array = zeros((6, 1))
@@ -346,7 +359,7 @@ class Member3D():
             return zeros((12, 12))
         else:
             # Solve for `km` using a psuedo-inverse (pinv). The psuedo-inverse takes into account that we may have rows of zeros that make the matrix otherwise uninvertable.
-            return -ke @ G @ pinv(G.T @ ke @ G) @ G.T @ ke
+            return -keg @ G @ pinv(G.T @ keg @ G) @ G.T @ keg
 
     def _m_unc(self, mass_combo_name: str, mass_direction: str = 'Y', gravity: float = 1.0,
                mass_formulation: str = 'consistent') -> NDArray[float64]:
@@ -899,18 +912,25 @@ class Member3D():
         # Convert the global changes in displacement to local coordinates
         Delta_d = self.T() @ Delta_D
 
-        # Get the elastic local stiffness matrix (includeing goemetric stiffness)
-        d_total = self.d(combo_name)  # Total displacements acting on the member at the current load stp
-        delta_dx_total = d_total[6, 0] - d_total[0, 0]  # Change in displacement across the lenght of the member
-        P = self.section.A*self.material.E/self.L()*delta_dx_total  # Axial load acting on the member at the current load step
-        ke = self.k() + self.kg(P)  # Elastic stiffness (including geometric stiffness)
+        # Get the elastic local stiffness matrix, optionally including geometric stiffness
+        P = self.f_nonlin[combo_name][6] - self.f_nonlin[combo_name][0]
+        ke = self.ke()
+
+        if getattr(self.model, '_pushover_P_Delta', False):
+            ke = ke + self.kg(P)
 
         # Get the gradient to the failure surface at at each end of the element
         if self.section is None:
             raise Exception(f'Nonlinear material analysis requires member sections to be defined. A section definition is missing for element {self.name}.')
         else:
-            Gi = self.section.G(self._fxi, self._myi, self._mzi)
-            Gj = self.section.G(self._fxj, self._myj, self._mzj)
+            fxi = self.f_nonlin[combo_name][0]
+            myi = self.f_nonlin[combo_name][4]
+            mzi = self.f_nonlin[combo_name][5]
+            fxj = self.f_nonlin[combo_name][6]
+            myj = self.f_nonlin[combo_name][10]
+            mzj = self.f_nonlin[combo_name][11]
+            Gi = self.section.G(fxi, myi, mzi)
+            Gj = self.section.G(fxj, myj, mzj)
 
         # Combine the gradients for the i and j-nodes
         zeros_array = zeros((6, 1))
@@ -940,23 +960,23 @@ class Member3D():
         R1_indices, R2_indices = self._partition_D()
 
         # Partition the local stiffness matrix and local fixed end reaction vector
-        k11, k12, k21, k22 = self._partition(self._k_unc())
+        k11, k12, k21, k22 = self._partition(self._ke_unc())
         fer1, fer2 = self._partition(self._fer_unc(combo_name))
 
         # Calculate the condensed fixed end reaction vector
-        ferCondensed = subtract(fer1, matmul(matmul(k12, inv(k22)), fer2))
+        fer_condensed = subtract(fer1, matmul(matmul(k12, inv(k22)), fer2))
 
         # Expand the condensed fixed end reaction vector
         i = 0
         for DOF in self.Releases:
 
             if DOF == True:
-                ferCondensed = insert(ferCondensed, i, 0, axis=0)
+                fer_condensed = insert(fer_condensed, i, 0, axis=0)
 
             i += 1
 
         # Return the fixed end reaction vector
-        return ferCondensed
+        return fer_condensed
 
     def _fer_unc(self, combo_name:str = 'Combo 1') -> NDArray[float64]:
         """
@@ -1073,11 +1093,15 @@ class Member3D():
             m22 = unp_matrix[R2_indices, :][:, R2_indices]
             return  m11, m12, m21, m22
 
-    def f(self, combo_name: str='Combo 1', push_combo: str = None, step_num: int = None) -> NDArray[float64]:
+    def f(self, combo_name: str='Combo 1', Delta_d: NDArray[float64]=None, Delta_fer: NDArray[float64]=None) -> NDArray[float64]:
         """Returns the member's local end force vector for the given load combination.
 
         :param combo_name: The load combination to get the local end for vector for. Defaults to 'Combo 1'.
         :type combo_name: str, optional
+        :param Delta_d: The member's local displacement vector for a load step. Only used for nonlinear pushover analysis.
+        :type Delta_d: NDArray[float64]
+        :param Delta_fer: The member's fixed end reaction vector for a load step. Only used for nonlinear pushover analysis.
+        :type Delta_fer: NDArray[float64]
         :return: The member's local end force vector for the given load combination.
         :rtype: array
         """
@@ -1088,26 +1112,34 @@ class Member3D():
             # Back-calculate the axial force on the member from the axial strain
             P = (self.d(combo_name)[6, 0] - self.d(combo_name)[0, 0])*self.section.A*self.material.E/self.L()
 
-            return add(matmul(add(self.k(), self.kg(P)), self.d(combo_name)), self.fer(combo_name))
+            return add(matmul(add(self.ke(), self.kg(P)), self.d(combo_name)), self.fer(combo_name))
 
-        # Check for a pushover analysis
-        elif push_combo is not None and step_num is not None:
+        # Check for a pushover analysis. During post-processing `moment()`, `shear()`, etc.
+        # call this method without explicitly passing `push_combo` and `step_num`, so pull the
+        # accepted step information back from the model when needed.
+        elif self.model.solution == 'Pushover':
 
-            # Calculate the axial force on the member from the latest elasto-plastic member end forces
-            P = self._fxi
+            # Post-processing calls this method without incremental load-step data,
+            # so return the accepted accumulated local end-force state.
+            if Delta_d is None or Delta_fer is None:
+                return self.f_nonlin[combo_name].reshape(12, 1)
 
-            # Calculate the total stiffness matrix
-            kt = self.k() + self.kg(P) + self.km(combo_name)
+            # Calculate the average axial force on the member from the latest elasto-plastic member end forces.
+            P = self.f_nonlin[combo_name][6] - self.f_nonlin[combo_name][0]
 
-            # Calculate the fixed end reaction vector for this load step
-            fer = self.fer(combo_name) + self.fer(push_combo)*step_num
+            # Calculate the total local stiffness matrix. Geometric stiffness is only included
+            # when the active pushover analysis has explicitly opted into P-Delta behavior.
+            k = self.ke() + self.km(combo_name)
 
-            # Retern the new member end forces
-            return kt @ self.d(combo_name) + fer
+            if getattr(self.model, '_pushover_P_Delta', False):
+                k = k + self.kg(P)
+
+            # Calculate and return the member's local end force vector for the pushover load step
+            return k @ Delta_d + Delta_fer
 
         else:
 
-            return self.k() @ self.d(combo_name) + self.fer(combo_name)
+            return self.ke() @ self.d(combo_name) + self.fer(combo_name)
 
     def d(self, combo_name='Combo 1') -> NDArray[float64]:
         """
@@ -1122,7 +1154,6 @@ class Member3D():
         # Calculate and return the local displacement vector
         return self.T() @ self.D(combo_name)
 
-    # Transformation matrix
     def T(self) -> NDArray[float64]:
         """
         Returns the transformation matrix for the member.
@@ -1228,8 +1259,7 @@ class Member3D():
 
         return transMatrix
 
-    # Member global stiffness matrix
-    def K(self) -> NDArray[float64]:
+    def Ke(self) -> NDArray[float64]:
         """Returns the global elastic stiffness matrix for the member.
 
         :return: The global elastic stiffness matrix for the member.
@@ -1237,7 +1267,7 @@ class Member3D():
         """
 
         # Calculate and return the stiffness matrix in global coordinates
-        return matmul(matmul(inv(self.T()), self.k()), self.T())
+        return matmul(matmul(inv(self.T()), self.ke()), self.T())
 
     def Kg(self, P: float=0.0):
         """Returns the global geometric stiffness matrix for the member. Used for P-Delta analysis.
@@ -1320,6 +1350,40 @@ class Member3D():
         # Return the global displacement vector
         return D
 
+    def _inactive_local_disp(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
+        """
+        Returns the member's local end-displacement vector built from *all* of
+        the nodal degrees of freedom.
+
+        Unlike :meth:`D`, the axial end displacements are always included. This
+        is used by the deflection result methods to describe an inactive
+        member's deflected shape. An inactive member (for example a tension-only
+        member that has gone slack during a tension/compression-only analysis)
+        is removed from the global stiffness matrix and therefore carries no
+        internal forces, but it is still physically connected to its nodes and
+        rides along with them. Its deflected shape is consequently the straight
+        chord between its two displaced end nodes, obtained by linearly
+        interpolating the local end displacements returned here.
+        """
+
+        # Read all six degrees of freedom from each end node
+        D = zeros((12, 1))
+        D[0, 0] = self.i_node.DX[combo_name]
+        D[1, 0] = self.i_node.DY[combo_name]
+        D[2, 0] = self.i_node.DZ[combo_name]
+        D[3, 0] = self.i_node.RX[combo_name]
+        D[4, 0] = self.i_node.RY[combo_name]
+        D[5, 0] = self.i_node.RZ[combo_name]
+        D[6, 0] = self.j_node.DX[combo_name]
+        D[7, 0] = self.j_node.DY[combo_name]
+        D[8, 0] = self.j_node.DZ[combo_name]
+        D[9, 0] = self.j_node.RX[combo_name]
+        D[10, 0] = self.j_node.RY[combo_name]
+        D[11, 0] = self.j_node.RZ[combo_name]
+
+        # Rotate the global displacements into the member's local coordinate system
+        return self.T() @ D
+
     def shear(self, Direction: Literal['Fy', 'Fz'], x: float, combo_name: str = 'Combo 1') -> float:
         """
         Returns the shear at a point along the member's length.
@@ -1350,11 +1414,11 @@ class Member3D():
                 # Check which segment 'x' falls on
                 for segment in self.SegmentsZ:
                     if round(x, 10) >= round(segment.x1, 10) and round(x, 10) < round(segment.x2, 10):
-                        return segment.Shear(x - segment.x1)
+                        return segment.shear(x - segment.x1)
 
                 if isclose(x, self.L()):
                     lastIndex = len(self.SegmentsZ) - 1
-                    return self.SegmentsZ[lastIndex].Shear(x - self.SegmentsZ[lastIndex].x1)
+                    return self.SegmentsZ[lastIndex].shear(x - self.SegmentsZ[lastIndex].x1)
 
             elif Direction == 'Fz':
 
@@ -1362,12 +1426,12 @@ class Member3D():
 
                     if round(x, 10) >= round(segment.x1, 10) and round(x, 10) < round(segment.x2, 10):
 
-                        return segment.Shear(x - segment.x1)
+                        return segment.shear(x - segment.x1)
 
                 if isclose(x, self.L()):
 
                     lastIndex = len(self.SegmentsY) - 1
-                    return self.SegmentsY[lastIndex].Shear(x - self.SegmentsY[lastIndex].x1)
+                    return self.SegmentsY[lastIndex].shear(x - self.SegmentsY[lastIndex].x1)
 
         else:
 
@@ -1511,7 +1575,8 @@ class Member3D():
             return (Vmin_global, governing_combo)
         return Vmin_global
 
-    def plot_shear(self, Direction: Literal['Fy', 'Fz'], combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20) -> None:
+    def plot_shear(self, Direction: Literal['Fy', 'Fz'], combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20,
+                   figsize: tuple[float, float] = (7, 3)) -> None:
         """
         Plots the shear diagram for the member.
 
@@ -1527,6 +1592,8 @@ class Member3D():
             max/min envelope is shown.
         n_points: int
             The number of points used to generate the plot
+        figsize : tuple of (float, float)
+            Figure size in inches as (width, height).
         """
 
         # Import 'pyplot' if not already done
@@ -1540,7 +1607,7 @@ class Member3D():
             combo_names = [name for name, combo in self.model.load_combos.items()
                            if combo.combo_tags is not None and any(tag in combo.combo_tags for tag in combo_name)]
 
-        fig, ax = Member3D.__plt.subplots()
+        fig, ax = Member3D.__plt.subplots(figsize=figsize)
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -1634,9 +1701,12 @@ class Member3D():
                 self._solved_combo = self.model.load_combos[combo_name]
 
             # Determine if a P-Delta analysis has been run
-            if self.model.solution == 'P-Delta' or self.model.solution == 'Pushover':
+            if self.model.solution == 'P-Delta':
                 # Include P-little-delta effects in the moment results
                 P_delta = True
+            elif self.model.solution == 'Pushover':
+                # Only include P-little-delta effects when the pushover step opted into P-Delta
+                P_delta = getattr(self.model, '_pushover_P_Delta', False)
             else:
                 # Do not include P-little delta effects in the moment results
                 P_delta = False
@@ -1713,12 +1783,18 @@ class Member3D():
         governing_combo = None
 
         for combo_name in combo_names:
+
             # Skip inactive combos
             if not self.active.get(combo_name, False):
                 continue
 
-            # Determine if P-Delta (or Pushover) effects should be included
-            P_delta = self.model.solution in ('P-Delta', 'Pushover')
+            # Determine if P-Delta effects should be included
+            if self.model.solution == 'P-Delta':
+                P_Delta = True
+            elif self.model.solution == 'Pushover':
+                P_Delta = getattr(self.model, '_pushover_P_Delta', False)
+            else:
+                P_Delta = False
 
             # If member not yet segmented for this combo, do it
             if self._solved_combo is None or combo_name != self._solved_combo.name:
@@ -1732,7 +1808,7 @@ class Member3D():
                 continue
 
             # Get the maximum moment for this combo
-            Mmax = max(segment.max_moment() for segment in segments)
+            Mmax = max(segment.max_moment(P_Delta) for segment in segments)
 
             # Update global maximum
             if Mmax_global is None or Mmax > Mmax_global:
@@ -1789,8 +1865,13 @@ class Member3D():
             if not self.active.get(combo_name, False):
                 continue
 
-            # Determine if P-Delta (or Pushover) effects should be included
-            P_delta = self.model.solution in ('P-Delta', 'Pushover')
+            # Determine if P-Delta effects should be included
+            if self.model.solution == 'P-Delta':
+                P_Delta = True
+            elif self.model.solution == 'Pushover':
+                P_Delta = getattr(self.model, '_pushover_P_Delta', False)
+            else:
+                P_Delta = False
 
             # If member not yet segmented for this combo, do it
             if self._solved_combo is None or combo_name != self._solved_combo.name:
@@ -1804,7 +1885,7 @@ class Member3D():
                 continue
 
             # Get the minimum moment for this combo
-            Mmin = min(segment.min_moment(P_delta) for segment in segments)
+            Mmin = min(segment.min_moment(P_Delta) for segment in segments)
 
             # Update global minimum
             if Mmin_global is None or Mmin < Mmin_global:
@@ -1818,8 +1899,8 @@ class Member3D():
             return (Mmin_global, governing_combo)
         return Mmin_global
 
-
-    def plot_moment(self, Direction: Literal['My', 'Mz'], combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20) -> None:
+    def plot_moment(self, Direction: Literal['My', 'Mz'], combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20,
+                    figsize: tuple[float, float] = (7, 3)) -> None:
         """
         Plots the moment diagram for the member.
 
@@ -1835,6 +1916,8 @@ class Member3D():
             max/min envelope is shown.
         n_points: int
             The number of points used to generate the plot
+        figsize : tuple of (float, float)
+            Figure size in inches as (width, height).
         """
 
         # Import 'pyplot' if not already done
@@ -1848,7 +1931,7 @@ class Member3D():
             combo_names = [name for name, combo in self.model.load_combos.items()
                            if combo.combo_tags is not None and any(tag in combo.combo_tags for tag in combo_name)]
 
-        fig, ax = Member3D.__plt.subplots()
+        fig, ax = Member3D.__plt.subplots(figsize=figsize)
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -1900,9 +1983,12 @@ class Member3D():
             self._solved_combo = self.model.load_combos[combo_name]
 
         # Determine if a P-Delta analysis has been run
-        if self.model.solution == 'P-Delta' or self.model.solution == 'Pushover':
+        if self.model.solution == 'P-Delta':
             # Include P-little-delta effects in the moment results
             P_delta = True
+        elif self.model.solution == 'Pushover':
+            # Only include P-little-delta effects when the pushover step opted into P-Delta
+            P_delta = getattr(self.model, '_pushover_P_Delta', False)
         else:
             # Do not include P-little delta effects in the moment results
             P_delta = False
@@ -1954,11 +2040,11 @@ class Member3D():
             # Check which segment 'x' falls on
             for segment in self.SegmentsX:
                 if round(x, 10) >= round(segment.x1, 10) and round(x, 10) < round(segment.x2, 10):
-                    return segment.Torsion()
+                    return segment.torsion()
 
                 if isclose(x, self.L()):
                     lastIndex = len(self.SegmentsX) - 1
-                    return self.SegmentsX[lastIndex].Torsion()
+                    return self.SegmentsX[lastIndex].torsion()
 
         else:
 
@@ -2014,7 +2100,7 @@ class Member3D():
                 continue
 
             # Get maximum torsion across all segments for this combo
-            Tmax = max(segment.MaxTorsion() for segment in self.SegmentsX)
+            Tmax = max(segment.max_torsion() for segment in self.SegmentsX)
 
             # Update global maximum
             if Tmax_global is None or Tmax > Tmax_global:
@@ -2027,7 +2113,6 @@ class Member3D():
         if isinstance(combo_tags, list):
             return (Tmax_global, governing_combo)
         return Tmax_global
-
 
     def min_torque(self, combo_tags: Union[str, List[str]] = 'Combo 1') -> Union[float, tuple[float, str]]:
         """
@@ -2079,7 +2164,7 @@ class Member3D():
                 continue
 
             # Get minimum torsion across all segments for this combo
-            Tmin = min(segment.MinTorsion() for segment in self.SegmentsX)
+            Tmin = min(segment.min_torsion() for segment in self.SegmentsX)
 
             # Update global minimum
             if Tmin_global is None or Tmin < Tmin_global:
@@ -2093,7 +2178,8 @@ class Member3D():
             return (Tmin_global, governing_combo)
         return Tmin_global
 
-    def plot_torque(self, combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20) -> None:
+    def plot_torque(self, combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20,
+                    figsize: tuple[float, float] = (7, 3)) -> None:
         """
         Plots the torque diagram for the member.
 
@@ -2105,6 +2191,8 @@ class Member3D():
             max/min envelope is shown.
         n_points: int
             The number of points used to generate the plot
+        figsize : tuple of (float, float)
+            Figure size in inches as (width, height).
         """
 
         # Import 'pyplot' if not already done
@@ -2118,7 +2206,7 @@ class Member3D():
             combo_names = [name for name, combo in self.model.load_combos.items()
                            if combo.combo_tags is not None and any(tag in combo.combo_tags for tag in combo_name)]
 
-        fig, ax = Member3D.__plt.subplots()
+        fig, ax = Member3D.__plt.subplots(figsize=figsize)
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -2338,7 +2426,8 @@ class Member3D():
             return (Pmin_global, governing_combo)
         return Pmin_global
 
-    def plot_axial(self, combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20) -> None:
+    def plot_axial(self, combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20,
+                   figsize: tuple[float, float] = (7, 3)) -> None:
         """
         Plots the axial force diagram for the member.
 
@@ -2350,6 +2439,8 @@ class Member3D():
             max/min envelope is shown.
         n_points: int
             The number of points used to generate the plot
+        figsize : tuple of (float, float)
+            Figure size in inches as (width, height).
         """
 
         # Import 'pyplot' if not already done
@@ -2363,7 +2454,7 @@ class Member3D():
             combo_names = [name for name, combo in self.model.load_combos.items()
                            if combo.combo_tags is not None and any(tag in combo.combo_tags for tag in combo_name)]
 
-        fig, ax = Member3D.__plt.subplots()
+        fig, ax = Member3D.__plt.subplots(figsize=figsize)
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -2420,7 +2511,6 @@ class Member3D():
 
         return self._extract_vector_results(self.SegmentsZ, x_array, 'axial')
 
-
     def deflection(self, Direction: Literal['dx', 'dy', 'dz'], x: float, combo_name: str = 'Combo 1') -> float:
         """
         Returns the deflection at a point along the member's length.
@@ -2446,8 +2536,10 @@ class Member3D():
                 self._segment_member(combo_name)
                 self._solved_combo = self.model.load_combos[combo_name]
 
-            if self.model.solution == 'P-Delta' or self.model.solution == 'Pushover':
+            if self.model.solution == 'P-Delta':
                 P_delta = True
+            elif self.model.solution == 'Pushover':
+                P_delta = getattr(self.model, '_pushover_P_Delta', False)
             else:
                 P_delta = False
 
@@ -2485,16 +2577,32 @@ class Member3D():
 
                     if round(x, 10) >= round(segment.x1, 10) and round(x, 10) < round(segment.x2, 10):
 
-                        return segment.deflection(x - segment.x1)
+                        return segment.deflection(x - segment.x1, P_delta)
 
                 if isclose(x, self.L()):
 
                     lastIndex = len(self.SegmentsY) - 1
-                    return self.SegmentsY[lastIndex].deflection(x - self.SegmentsY[lastIndex].x1)
+                    return self.SegmentsY[lastIndex].deflection(x - self.SegmentsY[lastIndex].x1, P_delta)
 
         else:
 
-            return 0
+            # An inactive member carries no internal forces, so it stays straight
+            # between its end nodes rather than bending. It still rides along with
+            # those nodes though, so its deflection is the linear interpolation of
+            # the local end-node displacements rather than zero (see issue #317).
+            d = self._inactive_local_disp(combo_name)
+            L = self.L()
+
+            if Direction == 'dx':
+                di, dj = d[0, 0], d[6, 0]
+            elif Direction == 'dy':
+                di, dj = d[1, 0], d[7, 0]
+            elif Direction == 'dz':
+                di, dj = d[2, 0], d[8, 0]
+            else:
+                raise ValueError(f"Direction must be 'dx', 'dy' or 'dz'. {Direction} was given.")
+
+            return di + (dj - di) * x / L
 
     def max_deflection(self, Direction: Literal['dx', 'dy', 'dz'], combo_tags: Union[str, List[str]] = 'Combo 1') -> Union[float, tuple[float, str]]:
         """
@@ -2567,7 +2675,6 @@ class Member3D():
             return (dmax_global, governing_combo)
         return dmax_global
 
-
     def min_deflection(self, Direction: Literal['dx', 'dy', 'dz'], combo_tags: Union[str, List[str]] = 'Combo 1') -> Union[float, tuple[float, str]]:
         """
         Returns the minimum deflection in the member across the specified
@@ -2639,7 +2746,8 @@ class Member3D():
             return (dmin_global, governing_combo)
         return dmin_global
 
-    def plot_deflection(self, Direction: Literal['dx', 'dy', 'dz'], combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20) -> None:
+    def plot_deflection(self, Direction: Literal['dx', 'dy', 'dz'], combo_name: Union[str, List[str]] = 'Combo 1', n_points: int = 20,
+                        figsize: tuple[float, float] = (7, 3)) -> None:
         """
         Plots the deflection diagram for the member.
 
@@ -2656,6 +2764,8 @@ class Member3D():
             max/min envelope is shown.
         n_points: int
             The number of points used to generate the plot
+        figsize : tuple of (float, float)
+            Figure size in inches as (width, height).
         """
 
         # Import 'pyplot' if not already done
@@ -2669,7 +2779,7 @@ class Member3D():
             combo_names = [name for name, combo in self.model.load_combos.items()
                            if combo.combo_tags is not None and any(tag in combo.combo_tags for tag in combo_name)]
 
-        fig, ax = Member3D.__plt.subplots()
+        fig, ax = Member3D.__plt.subplots(figsize=figsize)
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -2722,9 +2832,12 @@ class Member3D():
             self._solved_combo = self.model.load_combos[combo_name]
 
         # Determine if a P-Delta analysis has been run
-        if self.model.solution == 'P-Delta' or self.model.solution == 'Pushover':
+        if self.model.solution == 'P-Delta':
             # Include P-little-delta effects in the moment results
             P_delta = True
+        elif self.model.solution == 'Pushover':
+            # Only include P-little-delta effects when the pushover step opted into P-Delta
+            P_delta = getattr(self.model, '_pushover_P_Delta', False)
         else:
             # Do not include P-little delta effects in the moment results
             P_delta = False
@@ -2736,6 +2849,26 @@ class Member3D():
         else:
             if any(x_array<0) or any(x_array>L):
                 raise ValueError(f"All x values must be in the range 0 to {L}")
+
+        # An inactive member (e.g. a slack tension-only member) carries no
+        # internal forces, so it stays straight between its end nodes instead of
+        # bending. Report the linear interpolation of its end-node displacements,
+        # which it rides along with, rather than a segment-based bending shape
+        # (see issue #317). This mirrors Member3D.deflection().
+        if not self.active[combo_name]:
+
+            d = self._inactive_local_disp(combo_name)
+
+            if Direction == 'dx':
+                di, dj = d[0, 0], d[6, 0]
+            elif Direction == 'dy':
+                di, dj = d[1, 0], d[7, 0]
+            elif Direction == 'dz':
+                di, dj = d[2, 0], d[8, 0]
+            else:
+                raise ValueError(f"Direction must be 'dx', 'dy' or 'dz'. {Direction} was given.")
+
+            return array([x_array, di + (dj - di) * x_array / L])
 
         if P_delta:
             # P-delta analysis is not vectorised yet, do it element-wise
@@ -2788,6 +2921,14 @@ class Member3D():
             dzj = d[8,0]
             L = self.L()
 
+            # Determine if P-Delta effects should be included in segment deflection evaluations.
+            if self.model.solution == 'P-Delta':
+                P_delta = True
+            elif self.model.solution == 'Pushover':
+                P_delta = getattr(self.model, '_pushover_P_Delta', False)
+            else:
+                P_delta = False
+
             # Check which axis is of interest
             if Direction == 'dy':
 
@@ -2796,12 +2937,12 @@ class Member3D():
 
                     if round(x,10) >= round(segment.x1,10) and round(x,10) < round(segment.x2,10):
 
-                        return (segment.deflection(x - segment.x1)) - (dyi + (dyj-dyi)/L*x)
+                        return (segment.deflection(x - segment.x1, P_delta)) - (dyi + (dyj-dyi)/L*x)
 
                 if isclose(x, self.L()):
 
                     lastIndex = len(self.SegmentsZ) - 1
-                    return (self.SegmentsZ[lastIndex].deflection(x - self.SegmentsZ[lastIndex].x1))-dyj
+                    return (self.SegmentsZ[lastIndex].deflection(x - self.SegmentsZ[lastIndex].x1, P_delta))-dyj
 
             elif Direction == 'dz':
 
@@ -2809,18 +2950,19 @@ class Member3D():
 
                     if round(x,10) >= round(segment.x1,10) and round(x,10) < round(segment.x2,10):
 
-                        return (segment.deflection(x - segment.x1)) - (dzi + (dzj-dzi)/L*x)
+                        return (segment.deflection(x - segment.x1, P_delta)) - (dzi + (dzj-dzi)/L*x)
 
                 if isclose(x, self.L()):
 
                     lastIndex = len(self.SegmentsY) - 1
-                    return (self.SegmentsY[lastIndex].deflection(x - self.SegmentsY[lastIndex].x1)) - dzj
+                    return (self.SegmentsY[lastIndex].deflection(x - self.SegmentsY[lastIndex].x1, P_delta)) - dzj
 
         else:
 
             return 0
 
-    def plot_rel_deflection(self, Direction: Literal['dx', 'dy', 'dz'], combo_name: str = 'Combo 1', n_points: int = 20) -> None:
+    def plot_rel_deflection(self, Direction: Literal['dx', 'dy', 'dz'], combo_name: str = 'Combo 1', n_points: int = 20,
+                            figsize: tuple[float, float] = (7, 3)) -> None:
         """
         Plots the deflection diagram for the member
 
@@ -2833,6 +2975,10 @@ class Member3D():
                 'dz' = Deflection in the local z-axis.
         combo_name : string
             The name of the load combination to get the results for (not the combination itself).
+        n_points: int
+            The number of points used to generate the plot
+        figsize : tuple of (float, float)
+            Figure size in inches as (width, height).
         """
 
         # Segment the member if necessary
@@ -2845,7 +2991,7 @@ class Member3D():
             from matplotlib import pyplot as plt
             Member3D.__plt = plt
 
-        fig, ax = Member3D.__plt.subplots()
+        fig, ax = Member3D.__plt.subplots(figsize=figsize)
         ax.axhline(0, color='black', lw=1)
         ax.grid()
 
@@ -2887,6 +3033,14 @@ class Member3D():
         dzi = d[2, 0]
         dzj = d[8, 0]
 
+        # Determine if P-Delta effects should be included in segment deflection evaluations.
+        if self.model.solution == 'P-Delta':
+            P_delta = True
+        elif self.model.solution == 'Pushover':
+            P_delta = getattr(self.model, '_pushover_P_Delta', False)
+        else:
+            P_delta = False
+
         L = self.L()
         if x_array is None:
             x_array = linspace(0, L, n_points)
@@ -2896,11 +3050,11 @@ class Member3D():
 
         # Check which axis is of interest
         if Direction == 'dy':
-            deflections = self._extract_vector_results(self.SegmentsZ, x_array, 'deflection')[1]
+            deflections = self._extract_vector_results(self.SegmentsZ, x_array, 'deflection', P_delta)[1]
             return vstack((x_array, deflections - (dyi + (dyj-dyi)/L*x_array)))
 
         elif Direction == 'dz':
-            deflections = self._extract_vector_results(self.SegmentsY, x_array, 'deflection')[1]
+            deflections = self._extract_vector_results(self.SegmentsY, x_array, 'deflection', P_delta)[1]
             return vstack((x_array, deflections - (dzi + (dzj-dzi)/L*x_array)))
 
     def _segment_member(self, combo_name='Combo 1'):
@@ -2984,8 +3138,15 @@ class Member3D():
 
         # Get the element local end forces, local fixed end reactions, and local displacements
         f = self.f(combo_name)           # Member local end force vector
-        fer = self._fer_unc(combo_name)  # Member local fixed end reaction vector
+        fer = self._fer_unc(combo_name)  # Member local fixed end reaction vector (uncondensed)
         d = self.d(combo_name)           # Member local displacement vector
+
+        # Pushover combos should include the effects of both the primary and pushover combos in the
+        # fixed end reactions.
+        if self.model.solution == 'Pushover':
+            push_combo = self.model._pushover_state[combo_name]['push_combo']
+            push_step = self.model._pushover_state[combo_name]['step_num']
+            fer = fer + self._fer_unc(push_combo)*push_step
 
         # Get the local deflections and calculate the slope at the start of the member
         # Note 1: The slope may not be available directly from the local displacement vector if member end releases have been used, so slope-deflection has been applied to solve for it.
@@ -3011,6 +3172,13 @@ class Member3D():
         SegmentsZ[0].delta_x1 = d[0, 0]
         SegmentsY[0].delta_x1 = d[0, 0]
         SegmentsX[0].delta_x1 = d[0, 0]
+        # Check to see if P-Delta effects should be included
+        if self.model.solution == 'P-Delta':
+            P_delta = True
+        elif self.model.solution == 'Pushover':
+            P_delta = getattr(self.model, '_pushover_P_Delta', False)
+        else:
+            P_delta = False
 
         # Add loads to each segment
         for i in range(len(SegmentsZ)):
@@ -3030,12 +3198,12 @@ class Member3D():
 
             # Initialize the slope and displacement at the start of the segment
             if i > 0:  # The first segment has already been initialized
-                SegmentsZ[i].theta1 = SegmentsZ[i-1].slope(SegmentsZ[i-1].Length())
-                SegmentsZ[i].delta1 = SegmentsZ[i-1].deflection(SegmentsZ[i-1].Length())
-                SegmentsZ[i].delta_x1 = SegmentsZ[i-1].axial_deflection(SegmentsZ[i-1].Length())
-                SegmentsY[i].theta1 = SegmentsY[i-1].slope(SegmentsY[i-1].Length())
-                SegmentsY[i].delta1 = SegmentsY[i-1].deflection(SegmentsY[i-1].Length())
-                SegmentsY[i].delta_x1 = SegmentsY[i-1].axial_deflection(SegmentsY[i-1].Length())
+                SegmentsZ[i].theta1 = SegmentsZ[i-1].slope(SegmentsZ[i-1].length(), P_delta)
+                SegmentsZ[i].delta1 = SegmentsZ[i-1].deflection(SegmentsZ[i-1].length(), P_delta)
+                SegmentsZ[i].delta_x1 = SegmentsZ[i-1].axial_deflection(SegmentsZ[i-1].length())
+                SegmentsY[i].theta1 = SegmentsY[i-1].slope(SegmentsY[i-1].length(), P_delta)
+                SegmentsY[i].delta1 = SegmentsY[i-1].deflection(SegmentsY[i-1].length(), P_delta)
+                SegmentsY[i].delta_x1 = SegmentsY[i-1].axial_deflection(SegmentsY[i-1].length())
 
             # Add the effects of the beam end forces to the segment
             SegmentsZ[i].P1 = f[0, 0]
@@ -3046,8 +3214,13 @@ class Member3D():
             SegmentsY[i].M1 = f[4, 0] + f[2, 0]*x
             SegmentsX[i].T1 = f[3, 0]
 
-            # Step through each load case in the specified load combination
-            for case, factor in combo.factors.items():
+            if self.model.solution == 'Pushover':
+                push_combo = self.model._pushover_state[combo_name]['push_combo']
+                push_step = self.model._pushover_state[combo_name]['step_num']
+
+            # Define a helper function to sum up the effects of a load case on the segment, using
+            # its given factor.
+            def sum_load_effects(case, factor):
 
                 # Add effects of point loads occuring prior to this segment
                 for ptLoad in self.PtLoads:
@@ -3205,6 +3378,15 @@ class Member3D():
                                 SegmentsY[i].V1 += (f1[2] + f2[2])/2*(x2 - x1)
                                 SegmentsY[i].M1 += (x1 - x2)*(2*f1[2]*x1 - 3*f1[2]*x + f1[2]*x2 + f2[2]*x1 - 3*f2[2]*x + 2*f2[2]*x2)/6
 
+            # Step through each load case in the specified load combination
+            for case, factor in combo.factors.items():
+                sum_load_effects(case, factor)
+
+            # Do the same for the pushover combo if this is a pushover analysis
+            if self.model.solution == 'Pushover':
+                for case, factor in self.model.load_combos[push_combo].factors.items():
+                    sum_load_effects(case, factor*push_step)
+
     def _extract_vector_results(self, segments: List, x_array: NDArray[float64], result_name: Literal['moment', 'shear', 'axial', 'torque', 'deflection', 'axial_deflection'], P_delta: bool = False) -> NDArray[float64]:
         """
         Extracts result values at specified locations along a structural member using efficient,
@@ -3219,7 +3401,7 @@ class Member3D():
         ----------
         segments : List
             List of segment objects. Each segment represents a portion of a structural member
-            and must have properties `x1`, `x2`, and appropriate result methods (e.g. `moment()`, `Shear()`, etc.).
+            and must have properties `x1`, `x2`, and appropriate result methods (e.g. `moment()`, `shear()`, etc.).
 
         x_array : NDArray[float64]
             1D NumPy array of x-coordinates (global positions along the member) at which to evaluate results.
@@ -3252,9 +3434,9 @@ class Member3D():
         # Dispatch table maps the result name to the correct evaluation function
         method_map = {
             "moment": lambda s, x: s.moment(x, P_delta),
-            "shear": lambda s, x: s.Shear(x),
+            "shear": lambda s, x: s.shear(x),
             "axial": lambda s, x: s.axial(x),
-            "torque": lambda s, x: s.Torsion(x),
+            "torque": lambda s, x: s.torsion(x),
             "deflection": lambda s, x: s.deflection(x, P_delta),
             "axial_deflection": lambda s, x: s.axial_deflection(x),
         }
