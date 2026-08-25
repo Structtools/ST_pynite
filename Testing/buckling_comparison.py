@@ -80,18 +80,19 @@ B2 = 5.0  # span of right bay (between Col2 and Col3)
 N_ELEM = 8
 
 # --- Material: steel (SI units: N, m, Pa) -----------------------------------
-E = 200e9  # Young's modulus
-G = 80e9  # Shear modulus
-NU = 0.3  # Poisson's ratio
-RHO = 0.0  # density -- set to 7850 if you want self-weight included
+E = 210e9    # Young's modulus
+G = 80.769e9 # Shear modulus
+NU = 0.3     # Poisson's ratio
+RHO = 0.0    # density -- set to 7850 if you want self-weight included
 
 # --- Cross-sections ---------------------------------------------------------
-# Add more entries here and assign them per member below.
-# Keys: (A [m^2], Iy [m^4], Iz [m^4], J [m^4])
+# Keys: (A [m^2], Iy [m^4], Iz [m^4], J [m^4], Asy [m^2], Asz [m^2])
+# Asy = shear area for y-dir shear (bending about z / weak-axis) = flange area
+# Asz = shear area for z-dir shear (bending about y / strong-axis) = web area
 SECTIONS = {
-    "IPE200": dict(A=28.5e-4, Iy=1943e-8, Iz=142e-8, J=7.0e-8),
-    "IPE300": dict(A=53.8e-4, Iy=8356e-8, Iz=604e-8, J=20.1e-8),
-    "HEA200": dict(A=53.8e-4, Iy=3692e-8, Iz=1336e-8, J=21.1e-8),
+    "IPE200": dict(A=28.48e-4, Iy=1943e-8, Iz=142e-8, J=7.0e-8, Asy=17.0e-4, Asz=14.02e-4),
+    "IPE300": dict(A=53.8e-4, Iy=8356e-8, Iz=604e-8, J=20.1e-8, Asy=32.10e-4, Asz=25.67e-4),
+    "HEA200": dict(A=53.8e-4, Iy=3692e-8, Iz=1336e-8, J=21.1e-8, Asy=40.0e-4, Asz=18.05e-4),
 }
 
 # Which section for each member type
@@ -140,6 +141,17 @@ COL_LOAD_3_FX = 0.0  # Col3 (F->D) -- ignored if B2 = 0
 #         This is the more complete structural analysis (recommended).
 LATERAL_BRACE_BEAM_NODES = False
 
+# --- Lateral bracing / 2D constraint ----------------------------------------
+# True  = restrain out-of-plane DOFs (DZ, RX, RY) at all non-base nodes
+#         forces pure in-plane buckling — use for braced frames
+# False = full 3D analysis including lateral-torsional buckling
+LATERAL_BRACE_NODES = True
+
+# --- Beam element formulation -----------------------------------------------
+# True  = Timoshenko beam (includes shear deformation via Asy/Asz)
+# False = Euler-Bernoulli (classical, no shear deformation)
+USE_TIMOSHENKO = True
+
 # --- Buckling analysis settings --------------------------------------------
 NUM_MODES = 5  # number of buckling modes to compute
 COMBO_NAME = "Combo 1"
@@ -147,6 +159,24 @@ COMBO_NAME = "Combo 1"
 # ============================================================================
 # END OF PARAMETERS
 # ============================================================================
+
+# ---------------------------------------------------------------------------
+# FEM Design reference results (critical parameters / load multipliers)
+# ---------------------------------------------------------------------------
+# Each key is a scenario number; values are lists of lambda_cr per mode.
+# Source: FEM Design 2024, 2-bay portal frame, IPE200 all members,
+#         E=210 GPa, G=80.769 GPa, rigid line supports (out-of-plane
+#         restrained), member-length loads.
+#
+# Mapping:  SC1 = LCO-UDL, SC2 = LCO-POINT-VER, SC3 = LCO-POINT-HOR,
+#           SC4 = LCO-WIND
+
+_FEM_DESIGN_REF = {
+    1: [86.165, 192.472, 378.982, 399.820],
+    2: [426.220, 875.321, 1691.256, 1818.937],
+    3: [3009.664, 4497.038, 5230.423, 8888.210],
+    4: [285.558, 525.868, 821.075, 860.412],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +198,7 @@ _PRESETS = {
         LOAD_C=0.0,
         LOAD_D=0.0,
         LATERAL_BRACE_BEAM_NODES=False,
+        LATERAL_BRACE_NODES=True,
         N_ELEM=8,
         NUM_MODES=5,
     ),
@@ -193,6 +224,7 @@ _PRESETS = {
         COL_LOAD_2_FX=0.0,
         COL_LOAD_3_FX=0.0,
         LATERAL_BRACE_BEAM_NODES=False,
+        LATERAL_BRACE_NODES=True,
         N_ELEM=8,
         NUM_MODES=5,
     ),
@@ -218,6 +250,7 @@ _PRESETS = {
         COL_LOAD_2_FX=0.0,
         COL_LOAD_3_FX=0.0,
         LATERAL_BRACE_BEAM_NODES=False,
+        LATERAL_BRACE_NODES=True,
         N_ELEM=8,
         NUM_MODES=5,
     ),
@@ -243,6 +276,7 @@ _PRESETS = {
         COL_LOAD_2_FX=0.0,
         COL_LOAD_3_FX=10e3,
         LATERAL_BRACE_BEAM_NODES=False,
+        LATERAL_BRACE_NODES=True,
         N_ELEM=8,
         NUM_MODES=5,
     ),
@@ -282,19 +316,23 @@ def _add_column(
         nn = f"_{name}_int{i}"
         model.add_node(nn, base_x, i * h, 0.0)
     model.def_support(base_node, *base_support)
-    model.add_member(name, base_node, top_node, mat, sec)
+    model.add_member(name, base_node, top_node, mat, sec, rotation=90)
 
 
 def _add_beam(
-    model, name, left_node, right_node, mat, sec, n_elem, y_level, x_left, x_right
+    model, name, node_i, node_j, mat, sec, n_elem, xi, yi, xj, yj
 ):
-    """Add a horizontal beam with n_elem intermediate nodes."""
-    span = x_right - x_left
-    dx = span / n_elem
+    """Add a beam with n_elem intermediate nodes.
+
+    Intermediate nodes are placed by linear interpolation between
+    (xi, yi, 0) and (xj, yj, 0).  Works for both horizontal and
+    inclined members.
+    """
     for i in range(1, n_elem):
+        t = i / n_elem
         nn = f"_{name}_int{i}"
-        model.add_node(nn, x_left + i * dx, y_level, 0.0)
-    model.add_member(name, left_node, right_node, mat, sec)
+        model.add_node(nn, xi + t * (xj - xi), yi + t * (yj - yi), 0.0)
+    model.add_member(name, node_i, node_j, mat, sec, rotation=90)
 
 
 def build_model():
@@ -303,7 +341,15 @@ def build_model():
 
     model.add_material("Steel", E, G, NU, RHO)
     for sec_name, props in SECTIONS.items():
-        model.add_section(sec_name, props["A"], props["Iy"], props["Iz"], props["J"])
+        if USE_TIMOSHENKO:
+            model.add_section(
+                sec_name, props["A"], props["Iy"], props["Iz"], props["J"],
+                Asy=props.get("Asy"), Asz=props.get("Asz"),
+            )
+        else:
+            model.add_section(
+                sec_name, props["A"], props["Iy"], props["Iz"], props["J"],
+            )
 
     # Column base nodes
     model.add_node("A", 0.0, 0.0, 0.0)
@@ -339,9 +385,9 @@ def build_model():
         )
 
     # Beams
-    _add_beam(model, "Beam1", "B", "C", "Steel", BEAM_SEC, N_ELEM, H, 0.0, B1)
+    _add_beam(model, "Beam1", "B", "C", "Steel", BEAM_SEC, N_ELEM, 0.0, H, B1, H)
     if two_bay:
-        _add_beam(model, "Beam2", "C", "D", "Steel", BEAM_SEC, N_ELEM, H, B1, B1 + B2)
+        _add_beam(model, "Beam2", "C", "D", "Steel", BEAM_SEC, N_ELEM, B1, H, B1 + B2, H)
 
     # --- Distributed beam loads ----------------------------------------------
     if BEAM_LOAD_1 != 0.0:
@@ -385,6 +431,15 @@ def build_model():
         for node in brace_nodes:
             model.def_support(node, False, False, True, False, False, False)
 
+    # --- Lateral bracing / 2D constraint --------------------------------------
+    # When True, restrain out-of-plane DOFs (DZ, RX, RY) at ALL non-base
+    # nodes — forces pure in-plane buckling (DX, DY, RZ active).
+    base_nodes = ["A", "E"] + (["F"] if two_bay else [])
+    if LATERAL_BRACE_NODES:
+        for node_name in model.nodes:
+            if node_name not in base_nodes:
+                model.def_support(node_name, False, False, True, True, True, False)
+
     return model, two_bay
 
 
@@ -403,6 +458,11 @@ def _print_section_info():
         print(f"    Iy = {s['Iy'] * 1e8:.0f} cm^4  (strong axis)")
         print(f"    Iz = {s['Iz'] * 1e8:.0f} cm^4  (weak axis)")
         print(f"    J  = {s['J'] * 1e8:.2f} cm^4")
+        if USE_TIMOSHENKO and s.get('Asy') and s.get('Asz'):
+            print(f"    Asy= {s['Asy'] * 1e4:.2f} cm^2  (shear area, weak-axis bending)")
+            print(f"    Asz= {s['Asz'] * 1e4:.2f} cm^2  (shear area, strong-axis bending)")
+    beam_type = "Timoshenko (shear deformation included)" if USE_TIMOSHENKO else "Euler-Bernoulli (no shear deformation)"
+    print(f"  Beam formulation : {beam_type}")
     print()
 
 
@@ -800,13 +860,31 @@ def main():
             N = bm.axial(x=0.0, combo_name=COMBO_NAME)
             sign = "compr." if N > 0 else "tension"
             x_pts = [i * bm.L() / 20 for i in range(21)]
-            M_max = max(abs(bm.moment("Mz", x, combo_name=COMBO_NAME)) for x in x_pts)
+            M_max = max(abs(bm.moment("My", x, combo_name=COMBO_NAME)) for x in x_pts)
             print(f"  {bname:8s}  {N / 1e3:12.2f}  {M_max / 1e3:12.2f}  {sign}")
         except Exception as exc:
             print(f"  {bname:8s}  {'N/A':>12}  {'N/A':>12}  ({exc})")
     print(SEP)
     print()
     print("  Done.  Compare Lambda_cr and L_cr/H with PolyFrame / FEM Design output.")
+
+    # --- FEM Design comparison ------------------------------------------------
+    fem_ref = _FEM_DESIGN_REF.get(SCENARIO)
+    if fem_ref:
+        print()
+        print(SEP)
+        print("  FEM Design comparison")
+        print(SEP)
+        print(f"  {'Mode':>4}  {'PyNite':>10}  {'FEM Design':>10}  {'Diff':>8}")
+        print(SEP)
+        for i, lam in enumerate(lams):
+            if i < len(fem_ref):
+                ref = fem_ref[i]
+                diff = (lam - ref) / ref * 100
+                print(f"  {i + 1:4d}  {lam:10.3f}  {ref:10.3f}  {diff:+7.1f}%")
+            else:
+                print(f"  {i + 1:4d}  {lam:10.3f}  {'n/a':>10}")
+        print(SEP)
 
 
 if __name__ == "__main__":

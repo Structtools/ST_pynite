@@ -6,6 +6,7 @@ from math import isclose
 import numpy as np
 import scipy as sp
 from scipy.sparse.linalg import eigsh, spsolve
+from scipy.sparse.linalg import ArpackNoConvergence
 
 from numpy import array, atleast_2d, zeros, subtract, matmul, divide, seterr, nanmax
 from numpy.linalg import solve
@@ -116,8 +117,15 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     3. Run a first-order static solve for *combo_name* to populate member
        axial forces (required for Kg assembly).
     4. Assemble K and Kg; partition both to free DOFs.
-    5. Solve ``eigsh(K11, M=−Kg11, sigma=0, which='LM', k=num_modes)``.
-    6. Filter positive eigenvalues and sort ascending.
+    5. Reformulate ``K φ = λ (−Kg) φ`` as ``(−Kg) φ = μ K φ`` (where
+       ``μ = 1/λ``), then call ``eigsh(−Kg11, M=K11, which='LA', k=k)``
+       to find the *largest algebraic* μ values.  K11 is the symmetric
+       positive-definite M-matrix; −Kg11 is the (possibly indefinite)
+       A-matrix.  No sigma-shift or regularisation is needed.
+    6. Keep only positive μ (positive μ ↔ positive λ, i.e. buckling under
+       load amplification; negative μ would require load reversal).
+       Convert ``λ = 1/μ`` and sort ascending so the smallest load
+       multiplier comes first.
 
     Parameters
     ----------
@@ -140,6 +148,27 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     RuntimeError
         If the static pre-solve or the eigenvalue solve fails.
     """
+    # ------------------------------------------------------------------ #
+    # Step 0: Force Timoshenko for all members during stability analysis   #
+    # ------------------------------------------------------------------ #
+    _set_force_timoshenko(model, True)
+
+    try:
+        return _buckling_analysis_inner(model, combo_name, num_modes)
+    finally:
+        _set_force_timoshenko(model, False)
+
+
+def _set_force_timoshenko(model: FEModel3D, value: bool) -> None:
+    """Set _force_timoshenko on all sub-members (and physical members) in the model."""
+    for phys_member in model.members.values():
+        phys_member._force_timoshenko = value
+        for sub_member in phys_member.sub_members.values():
+            sub_member._force_timoshenko = value
+
+
+def _buckling_analysis_inner(model, combo_name, num_modes):
+
     # ------------------------------------------------------------------ #
     # Step 1: Prepare model                                                #
     # ------------------------------------------------------------------ #
@@ -184,12 +213,12 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     # ------------------------------------------------------------------ #
     # Step 5: Eigenvalue solve                                             #
     #                                                                      #
-    # For compression-dominant structures, Kg11 is negative semi-definite, #
-    # so B = −Kg11 is positive semi-definite — exactly the right form for  #
-    # scipy's eigsh (which requires a positive semi-definite B).           #
+    # Reformulate  K φ = λ (−Kg) φ  as  (−Kg) φ = μ K φ  where μ = 1/λ. #
     #                                                                      #
-    # Small diagonal regularisation (eps) handles members with zero axial  #
-    # force, which would otherwise make B singular.                        #
+    # Now K is the M-matrix (symmetric positive definite — always valid    #
+    # for eigsh) and −Kg is the A-matrix (symmetric, may be indefinite).   #
+    # eigsh with which='LA' finds the largest μ → smallest positive λ.     #
+    # No epsilon regularisation is needed.                                 #
     # ------------------------------------------------------------------ #
     neg_Kg11 = (-Kg11).tocsr()
 
@@ -201,16 +230,29 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
             'buckling_analysis().'
         )
 
-    eps = float(np.abs(K11.diagonal()).mean()) * 1e-8
-    B = neg_Kg11 + sp.sparse.eye(K11.shape[0], format='csr') * eps
-
-    # eigsh requires k < N (matrix dimension)
-    k = min(num_modes, K11.shape[0] - 1)
+    n = K11.shape[0]
+    # Request extra modes to improve convergence; trim to num_modes later
+    k = min(max(num_modes, 2 * num_modes), n - 1)
 
     try:
-        eigenvalues, eigenvectors = eigsh(
-            K11, k=k, M=B, sigma=0.0, which='LM'
+        # Use a deterministic starting vector to ensure reproducible results
+        rng = np.random.RandomState(42)
+        v0 = rng.rand(n)
+        # Solve (-Kg) φ = μ K φ  for the largest algebraic μ.
+        # M = K11 is SPD, so eigsh is valid even though A = -Kg11 is indefinite.
+        eigenvalues_mu, eigenvectors = eigsh(
+            neg_Kg11, k=k, M=K11, which='LA', v0=v0,
+            maxiter=k * 40,
         )
+    except ArpackNoConvergence as exc:
+        # Use the converged eigenvalues/vectors even if not all converged
+        eigenvalues_mu = exc.eigenvalues
+        eigenvectors = exc.eigenvectors
+        if len(eigenvalues_mu) == 0:
+            raise RuntimeError(
+                'Eigenvalue solve failed: no eigenvalues converged. '
+                'Check that the structure has members under compression.'
+            ) from exc
     except Exception as exc:
         raise RuntimeError(
             f'Eigenvalue solve failed: {exc}. '
@@ -218,15 +260,26 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
         ) from exc
 
     # ------------------------------------------------------------------ #
-    # Step 6: Filter positive eigenvalues and sort ascending               #
+    # Step 6: Convert μ → λ, filter positive, sort ascending              #
     # ------------------------------------------------------------------ #
-    pos_mask     = eigenvalues > 0
-    eigenvalues  = eigenvalues[pos_mask]
-    eigenvectors = eigenvectors[:, pos_mask]
+    # Keep only safely positive μ values. Very small positive values can
+    # occur for nullspace/near-nullspace modes and are not safe to invert.
+    mu_scale = np.max(np.abs(eigenvalues_mu)) if len(eigenvalues_mu) else 0.0
+    mu_tol = max(1e-12, np.finfo(float).eps * max(1.0, mu_scale))
+    pos_mask      = eigenvalues_mu > mu_tol
+    eigenvalues_mu = eigenvalues_mu[pos_mask]
+    eigenvectors   = eigenvectors[:, pos_mask]
+
+    # Convert μ = 1/λ  →  λ = 1/μ, then discard any non-finite results as
+    # a final safeguard against numerical issues.
+    eigenvalues = 1.0 / eigenvalues_mu
+    finite_mask = np.isfinite(eigenvalues)
+    eigenvalues = eigenvalues[finite_mask]
+    eigenvectors = eigenvectors[:, finite_mask]
 
     order        = np.argsort(eigenvalues)
-    eigenvalues  = eigenvalues[order]
-    eigenvectors = eigenvectors[:, order]
+    eigenvalues  = eigenvalues[order][:num_modes]
+    eigenvectors = eigenvectors[:, order][:, :num_modes]
 
     model.solution = 'Buckling'
 

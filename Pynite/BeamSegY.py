@@ -56,9 +56,13 @@ class BeamSegY(BeamSegZ):
         if P_delta == True:
             delta_x = self.deflection(x, P_delta)
             delta_1 = self.delta1
-            return theta_1 + (-V1*x**2/2 - w1*x**3/6 + x*(-M1 - P1*delta_1 + P1*delta_x) + x**4*(w1 - w2)/(24*L))/EI
+            theta_x = theta_1 + (-V1*x**2/2 - w1*x**3/6 + x*(-M1 - P1*delta_1 + P1*delta_x) + x**4*(w1 - w2)/(24*L))/EI
         else:
-            return theta_1 + (-V1*x**2/2 - w1*x**3/6 + x*(-M1) + x**4*(w1 - w2)/(24*L))/EI
+            theta_x = theta_1 + (-V1*x**2/2 - w1*x**3/6 + x*(-M1) + x**4*(w1 - w2)/(24*L))/EI
+
+        # Return bending slope only (no shear rotation).
+        # Shear deformation is handled separately in `deflection()`.
+        return theta_x
 
     # Returns the deflection at a location on the segment
     def deflection(self, x: float, P_delta: bool = False) -> float:
@@ -73,16 +77,20 @@ class BeamSegY(BeamSegZ):
         L = self.Length()
         EI = self.EI
 
+        # Timoshenko shear deflection: integral of V(t)/kAG from 0 to x (sign-flipped for y-axis)
+        kAG = self.kAG
+        delta_shear = -(V1*x + w1*x**2/2 + (w2 - w1)*x**3/(6*L)) / kAG if kAG else 0.0
+
         # Check if a P-delta solution is requested
         if P_delta == True:
 
             # Return the calculated deflection, amplified for P-delta effects
-            return (delta_1 - theta_1*x + V1*x**3/(6*EI) + w1*x**4/(24*EI) - x**2*(-M1 - P1*delta_1)/(2*EI) - x**5*(w1 - w2)/(120*EI*L))/(1 + P1*x**2/(2*EI))
+            return (delta_1 - theta_1*x + V1*x**3/(6*EI) + w1*x**4/(24*EI) - x**2*(-M1 - P1*delta_1)/(2*EI) - x**5*(w1 - w2)/(120*EI*L))/(1 + P1*x**2/(2*EI)) + delta_shear
 
         else:
 
             # Return the calcuated deflection
-            return delta_1 - theta_1*x + V1*x**3/(6*EI) + w1*x**4/(24*EI) - x**2*(-M1)/(2*EI) - x**5*(w1 - w2)/(120*EI*L)
+            return delta_1 - theta_1*x + V1*x**3/(6*EI) + w1*x**4/(24*EI) - x**2*(-M1)/(2*EI) - x**5*(w1 - w2)/(120*EI*L) + delta_shear
 
     # Returns the maximum moment in the segment
     def max_moment(self, P_delta: bool = False) -> float:

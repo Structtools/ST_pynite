@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 from numpy.linalg import solve
 import scipy as sp
+from copy import deepcopy
 
 from Pynite.Node3D import Node3D
 from Pynite.Material import Material
@@ -19,9 +20,11 @@ from Pynite.Mesh import Mesh, RectangleMesh, AnnulusMesh, FrustrumMesh, Cylinder
 from Pynite.ShearWall import ShearWall
 from Pynite.MatFoundation import MatFoundation
 from Pynite import Analysis
+from Pynite.ModalResults import (ModalDiagnostics, ModalModelError, ModalResults,
+                                 ModalSolverError, fix_mode_shape_signs)
 
 if TYPE_CHECKING:
-    from typing import Dict, List
+    from typing import Dict, List, Tuple
     from numpy import float64
     from numpy.typing import NDArray
 
@@ -268,7 +271,20 @@ class FEModel3D():
         :type G: float
         :param nu: Poisson's ratio of the material.
         :type nu: float
-        :param rho: The density of the material
+        :param rho: The density of the material. Note that `add_member_self_weight` computes the
+                    self-weight load as `rho*A` and reads the result as a force per unit length, so
+                    `rho` is a *weight* density rather than a mass density. With base units of kN
+                    and m that makes steel roughly 78.5, not 7.85, and the mass that modal analysis
+                    derives from it comes out in kN·s²/m, which is a tonne.
+
+                    **The sign of `rho` is ignored when mass is assembled.** Only its magnitude is
+                    used, in all three mass paths: self-mass, load-derived point mass and
+                    load-derived distributed mass. A negative weight density is therefore a
+                    supported way to express the direction of self-weight -- `rho = -78.5` with
+                    `add_member_self_weight(direction, factor=1.0)` carries exactly the same mass,
+                    and yields exactly the same frequencies, as `rho = +78.5` with `factor=-1.0`.
+                    Mass is not a signed quantity, so neither convention can produce a negative
+                    element mass.
         :type rho: float
         :return: The name of the material added to the model.
         :rtype: str
@@ -299,7 +315,7 @@ class FEModel3D():
         # Return the materal name
         return name
 
-    def add_section(self, name: str, A: float, Iy: float, Iz: float, J: float) -> str:
+    def add_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Asy: float = 0.0, Asz: float = 0.0) -> str:
         """Adds a cross-section to the model.
 
         :param name: A unique name for the cross-section.
@@ -312,6 +328,10 @@ class FEModel3D():
         :type Iz: float
         :param J: The torsion constant of the section
         :type J: float
+        :param Asy: Shear area for shear in the local y-direction (bending about z).
+        :type Asy: float
+        :param Asz: Shear area for shear in the local z-direction (bending about y).
+        :type Asz: float
         """
 
         # Name the section or check it doesn't already exist
@@ -327,12 +347,12 @@ class FEModel3D():
                 count += 1
 
         # Add the new section to the model
-        self.sections[name] = Section(self, name, A, Iy, Iz, J)
+        self.sections[name] = Section(self, name, A, Iy, Iz, J, Asy, Asz)
 
         # Return the section name
         return name
 
-    def add_steel_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Zy: float, Zz: float, material_name: str) -> str:
+    def add_steel_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Zy: float, Zz: float, material_name: str, Asy: float = 0.0, Asz: float = 0.0) -> str:
         """Adds a cross-section to the model.
 
         :param name: A unique name for the cross-section.
@@ -351,6 +371,10 @@ class FEModel3D():
         :type Zz: float
         :param material_name: The name of the steel material
         :type material_name: str
+        :param Asy: Shear area for shear in the local y-direction (bending about z).
+        :type Asy: float
+        :param Asz: Shear area for shear in the local z-direction (bending about y).
+        :type Asz: float
         """
 
         # Name the section or check it doesn't already exist
@@ -366,7 +390,7 @@ class FEModel3D():
                 count += 1
 
         # Add the new section to the model
-        self.sections[name] = SteelSection(self, name, A, Iy, Iz, J, Zy, Zz, material_name)
+        self.sections[name] = SteelSection(self, name, A, Iy, Iz, J, Zy, Zz, material_name, Asy, Asz)
 
         # Return the section name
         return name
@@ -424,7 +448,7 @@ class FEModel3D():
         # Return the spring name
         return name
 
-    def add_member(self, name: str, i_node: str, j_node: str, material_name: str, section_name: str, rotation: float = 0.0, tension_only: bool = False, comp_only: bool = False) -> str:
+    def add_member(self, name: str, i_node: str, j_node: str, material_name: str, section_name: str, rotation: float = 0.0, tension_only: bool = False, comp_only: bool = False, beam_type: str = 'timoshenko') -> str:
         """Adds a new physical member to the model.
 
         :param name: A unique user-defined name for the member. If ``None`` or ``""``, a name will be automatically assigned
@@ -443,6 +467,8 @@ class FEModel3D():
         :type tension_only: bool, optional
         :param comp_only: Indicates if the member is compression-only, defaults to False
         :type comp_only: bool, optional
+        :param beam_type: Beam formulation to use: ``'timoshenko'`` (includes shear deformation) or ``'bernoulli'`` (Euler-Bernoulli, no shear deformation). Default is ``'timoshenko'``.
+        :type beam_type: str, optional
         :raises NameError: Occurs if the specified name already exists.
         :return: The name of the member added to the model.
         :rtype: str
@@ -467,7 +493,7 @@ class FEModel3D():
             raise NameError(f"Node '{e.args[0]}' does not exist in the model")
 
         # Create a new member
-        new_member = PhysMember(self, name, pn_nodes[0], pn_nodes[1], material_name, section_name, rotation=rotation, tension_only=tension_only, comp_only=comp_only)
+        new_member = PhysMember(self, name, pn_nodes[0], pn_nodes[1], material_name, section_name, rotation=rotation, tension_only=tension_only, comp_only=comp_only, beam_type=beam_type)
 
         # Add the new member to the model
         self.members[name] = new_member
@@ -1338,6 +1364,56 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
+    def add_node_mass(self, node_name: str, mass: float, IX: float = 0.0, IY: float = 0.0, IZ: float = 0.0):
+        """Adds an explicit point mass to a node, for use in modal analysis.
+
+        Unlike mass derived from a load combination, this is a real mass in the model's mass units
+        rather than a force, so it is neither divided by gravity nor scaled by a load factor. With
+        base units of kN, m and s, mass is expressed in kN·s²/m, which is a tonne. Use this for
+        equipment, tanks, and any non-structural mass that has been worked out ahead of time.
+
+        Masses accumulate, so calling this twice for the same node adds the two together.
+
+        :param node_name: The name of the node the mass is being applied to.
+        :type node_name: str
+        :param mass: The translational mass, applied to all three translational directions.
+        :type mass: float
+        :param IX: Rotational inertia about the global X-axis. Defaults to 0.0.
+        :type IX: float, optional
+        :param IY: Rotational inertia about the global Y-axis. Defaults to 0.0.
+        :type IY: float, optional
+        :param IZ: Rotational inertia about the global Z-axis. Defaults to 0.0.
+        :type IZ: float, optional
+        :raises ValueError: Occurs when a negative mass or rotational inertia is specified.
+        :raises NameError: Occurs when the specified node does not exist in the model.
+        """
+
+        # Validate the mass terms. A negative mass is never physical and would make the mass
+        # matrix indefinite, which the eigensolver reports as a confusing convergence failure
+        # rather than as the modelling error it is.
+        if mass < 0:
+            raise ValueError(f'Nodal mass must not be negative. {mass} was given for node {node_name}.')
+
+        if IX < 0 or IY < 0 or IZ < 0:
+            raise ValueError(
+                f'Nodal rotational inertia must not be negative. ({IX}, {IY}, {IZ}) was given for '
+                f'node {node_name}.'
+            )
+
+        # Add the mass to the node
+        try:
+            node = self.nodes[node_name]
+        except KeyError:
+            raise NameError(f"Node '{node_name}' does not exist in the model")
+
+        node.mass += mass
+        node.mass_IX += IX
+        node.mass_IY += IY
+        node.mass_IZ += IZ
+
+        # Flag the model as unsolved
+        self.solution = None
+
     def add_member_pt_load(self, member_name:str, direction:str, P:float, x:float, case:str = 'Case 1'):
         """Adds a member point load to the model.
 
@@ -1991,7 +2067,7 @@ class FEModel3D():
             else:
                 return 1.0  # Default fallback
 
-    def M(self, mass_combo_name: str | None = None, mass_direction: str = 'Y', gravity: float = 1.0, log: bool = False, sparse: bool = True):
+    def M(self, mass_combo_name: str | None = None, mass_direction: str = 'Y', gravity: float = 1.0, log: bool = False, sparse: bool = True, mass_formulation: str = 'consistent'):
         """
         Returns the model's global mass matrix for dynamic analysis. This implementation follows a separation of responsibilities approach, where members handle both translational and rotational mass/inertia, while nodes provide translational mass only (to prevent double-counting). Rotational stability terms are only added to free DOFs considering member releases and node supports.
 
@@ -2005,6 +2081,9 @@ class FEModel3D():
         :type log: bool, optional
         :param sparse: Whether to return a sparse matrix, defaults to `True`.
         :type sparse: bool, optional
+        :param mass_formulation: How load-derived mass is distributed: `'consistent'` (default) or
+                                 `'lumped'`. Self-weight always uses the consistent formulation.
+        :type mass_formulation: str, optional
         :return: Global mass matrix of shape (n_dof, n_dof)
         :rtype: scipy.sparse.coo_matrix or numpy.ndarray
         """
@@ -2036,7 +2115,7 @@ class FEModel3D():
                 # Step through each submember in this physical member
                 for member in phys_member.sub_members.values():
 
-                    member_M = member.M(mass_combo_name, mass_direction, gravity)
+                    member_M = member.M(mass_combo_name, mass_direction, gravity, mass_formulation)
                     # Reuse the same DOF layout as stiffness assembly so mass and stiffness
                     # stay aligned term-by-term.
                     # Build the DOF vector shared with stiffness for consistency.
@@ -2105,10 +2184,20 @@ class FEModel3D():
         if positive.size > 0:
             eps = positive.min()*1e-6  # tiny stabilization mass
         else:
-            raise Exception('Unable to perform modal analysis. Model is massless.')  # Fallback for truly massless models
+            raise ModalModelError(
+                'Unable to perform modal analysis. The model has no mass. Give the materials a '
+                'density and add self-weight loads to the mass combination, name a mass '
+                'combination whose loads can be converted to mass, or assign nodal point masses '
+                'with `add_node_mass`.'
+            )
 
         # Identify which terms on the diagonal have zero mass
         zero_diag = (Mdiag == 0)
+
+        # Remember which DOFs were only kept solvable by the stabilization mass. Modes that live
+        # on these DOFs are numerical artifacts rather than structural behavior, so the modal
+        # solver needs to be able to recognize and filter them.
+        self._mass_stabilized_dofs = np.flatnonzero(zero_diag)
 
         # Add our tiny stabilization mass to these terms
         if sparse:
@@ -2537,11 +2626,20 @@ class FEModel3D():
         # Flag the model as solved
         self.solution = 'P-Delta'
 
-    def analyze_modal(self, num_modes: int = 12, mass_combo_name: str = 'Combo 1', mass_direction: str = 'Y', gravity: float = 1.0, log=False, check_stability=True):
+    def analyze_modal(self, num_modes: int = 12, mass_combo_name: str = 'Combo 1',
+                      mass_direction: str = 'Y', gravity: float = 1.0, log=False,
+                      check_stability=True, mass_formulation: str = 'consistent',
+                      elements_per_member: int = 8, plane: str | None = None,
+                      linear_state: str | None = None) -> ModalResults:
         """
         Performs modal analysis to determine natural frequencies and mode shapes.
 
         A sparse solution based on `num_modes` is always used to help filter out irrelevant frequencies from unimportant modes.
+
+        Note that `gravity` defaults to 1.0, which is almost never what you want. Mass is derived
+        from loads by dividing by gravity, so leaving the default in place overstates the mass by a
+        factor of `g` and understates every frequency by a factor of `sqrt(g)`. Pass gravity in the
+        model's own units: 9.81 for kN/m/s, 32.2 for kip/ft/s.
 
         :param num_modes: Number of modes to calculate. Defaults to 12.
         :type num_modes: int, optional
@@ -2555,15 +2653,287 @@ class FEModel3D():
         :type log: bool, optional
         :param check_stability: When set to True, checks the stiffness matrix for unstable DOFs. Defaults to True.
         :type check_stability: bool, optional
-        :return: A list containing frequencies (Hz)
-        :rtype: List
-        :raises Exception: Occurs when a singular stiffness matrix is found.
+        :param mass_formulation: How load-derived mass is distributed: `'consistent'` (default) or
+                                 `'lumped'`. Consistent mass populates the rotational DOFs and
+                                 converges on the exact frequencies from above; lumped mass is
+                                 cheaper and converges from below. Self-weight always uses the
+                                 consistent formulation.
+        :type mass_formulation: str, optional
+        :param elements_per_member: Number of elements each physical member is subdivided into for
+                                    the duration of the analysis. Defaults to 8, which keeps modes
+                                    1 through 3 within 0.15% of the closed-form answer for a
+                                    uniform beam -- see `Testing/test_modal_analysis.py` for the
+                                    convergence study this default comes from. One element per
+                                    member leaves the higher modes badly wrong. The user's model is
+                                    never modified: the refinement happens on an internal copy.
+        :type elements_per_member: int, optional
+        :param plane: Restricts the analysis to a plane by restraining the out-of-plane degrees of
+                      freedom at every node: `'XY'`, `'XZ'`, `'YZ'`, or `None` (default) for a full
+                      three-dimensional analysis. Declare this for a planar model. Subdivision
+                      creates interior nodes that the caller never sees and so cannot restrain
+                      itself, and an unrestrained interior node lets lateral and torsional modes
+                      into the results -- which for many floors are the modes that actually govern,
+                      appearing here interleaved with the in-plane ones. As with subdivision, the
+                      restraints are applied to an internal copy and the caller's model is
+                      untouched, whatever arguments are given.
+        :type plane: str, optional
+        :param linear_state: Required declaration of which linear state to take the modes of when
+                             the model contains tension-only or compression-only members, whose
+                             stiffness depends on the load they carry. Pass `'all_active'` to treat
+                             every such member as engaged. There is no default, because guessing
+                             silently would produce a defensible-looking answer to a question the
+                             model does not actually pose.
+        :type linear_state: str, optional
+        :return: The frequencies, mode shapes, mass matrix, mass totals and solver diagnostics
+        :rtype: ModalResults
+        :raises ModalModelError: Occurs when the model has no well-defined set of modes: no mass, a
+                                 mechanism, or an ambiguous non-linear state.
+        :raises ModalSolverError: Occurs when the eigensolver fails on a well-posed model.
         """
 
         if log:
             print('+------------------+')
             print('| Analyzing: Modal |')
             print('+------------------+')
+
+        # Validate the arguments before doing any work, so that a bad call fails immediately
+        # rather than part way through an assembly
+        if num_modes < 1:
+            raise ValueError(f'`num_modes` must be at least 1. {num_modes} was given.')
+
+        if elements_per_member < 1:
+            raise ValueError(
+                f'`elements_per_member` must be at least 1. {elements_per_member} was given.'
+            )
+
+        if mass_formulation not in ('consistent', 'lumped'):
+            raise ValueError(
+                f"`mass_formulation` must be 'consistent' or 'lumped'. '{mass_formulation}' was given."
+            )
+
+        if plane not in (None, 'XY', 'XZ', 'YZ'):
+            raise ValueError(f"`plane` must be 'XY', 'XZ', 'YZ', or None. '{plane}' was given.")
+
+        # Refuse to guess at a state the model does not define (see `_check_linear_state`)
+        self._check_linear_state(linear_state)
+
+        if log and elements_per_member > 1:
+            print(f'- Subdividing members into {elements_per_member} elements for analysis')
+
+        if log and plane is not None:
+            print(f'- Restraining out-of-plane DOFs for a {plane}-plane analysis')
+
+        # Always work on a copy, even when there is nothing to subdivide or restrain. Solving on the
+        # caller's own model would be enough to destroy their static results, because preparing a
+        # model for analysis clears every stored nodal displacement. Making the copy unconditional
+        # makes the isolation guarantee unconditional too, rather than something that happens to hold
+        # for most argument combinations.
+        model = self._modal_mesh_copy(elements_per_member, plane)
+
+        # Force Timoshenko for all members during modal (eigenvalue) analysis
+        from Pynite.Analysis import _set_force_timoshenko
+        _set_force_timoshenko(model, True)
+
+        try:
+            results = model._analyze_modal_inner(num_modes, mass_combo_name, mass_direction,
+                                                 gravity, log, check_stability, mass_formulation,
+                                                 elements_per_member, plane, linear_state)
+        finally:
+            _set_force_timoshenko(model, False)
+
+        # Bring the results back onto the model the caller actually holds
+        self._adopt_modal_results(model, results)
+
+        return results
+
+    def _check_linear_state(self, linear_state: str | None) -> None:
+        """Rejects models whose linear state is ambiguous, rather than guessing one.
+
+        Modal analysis is a linear-elastic calculation, so it needs a single stiffness matrix. Two
+        of this model's features stop that from being well defined, and both are refused here
+        rather than resolved by assumption.
+
+        :param linear_state: The caller's declaration of which linear state to use, or `None`.
+        :type linear_state: str, optional
+        :raises ModalModelError: Occurs when the model's linear state is ambiguous or the
+                                 declaration is not one this version supports.
+        """
+
+        # Tension-only and compression-only members are active or inactive depending on the load
+        # they carry, so which stiffness matrix applies is a question about a load case rather than
+        # about the structure. Require the caller to say which state they mean.
+        conditional = [member.name for member in self.members.values()
+                       if member.tension_only or member.comp_only]
+
+        conditional += [spring.name for spring in self.springs.values()
+                        if spring.tension_only or spring.comp_only]
+
+        if conditional:
+
+            if linear_state is None:
+                raise ModalModelError(
+                    'This model contains tension-only or compression-only elements '
+                    f'({", ".join(sorted(conditional))}), whose stiffness depends on the load they '
+                    'carry, so it has no single linear state to take modes of. Pass '
+                    "`linear_state='all_active'` to compute the modes with every such element "
+                    'engaged.'
+                )
+
+            if linear_state != 'all_active':
+                raise ModalModelError(
+                    f"`linear_state` must be 'all_active' in this version. '{linear_state}' was "
+                    'given. Taking the modes of a state derived from a particular load '
+                    'combination is not supported yet.'
+                )
+
+        # Plastic limits put the model somewhere on a non-linear path, and the modes of the
+        # redistributed tangent system are not the modes of the initial elastic system. Version 1
+        # computes modes on the initial elastic model only, so a model carrying results from a
+        # non-linear solve is refused rather than reinterpreted.
+        # A second-order elastic solve is deliberately not refused here. Axial load does change the
+        # frequencies -- compression softens and tension stiffens -- but this version computes modes
+        # from the elastic stiffness without the geometric stiffness either way, so refusing the
+        # model would not make the answer any more correct. Surfacing that limitation is the
+        # caller's job.
+        if self.solution == 'Pushover':
+            raise ModalModelError(
+                'This model holds results from a pushover analysis. Modal analysis is linear-elastic '
+                'and version 1 computes modes on the initial elastic model only, so a post-yield '
+                'state cannot be carried into it. Re-run the modal analysis on a model that has not '
+                'been solved past yield.'
+            )
+
+    def _modal_mesh_copy(self, elements_per_member: int, plane: str | None = None) -> FEModel3D:
+        """Returns a copy of this model with every physical member subdivided for modal analysis.
+
+        A physical member is one element between its end nodes, and one element per span gets the
+        higher modes badly wrong: for a uniform simply supported beam, two elements put mode 3 out
+        by 24%. Subdividing is therefore accuracy-critical rather than a refinement.
+
+        The refinement is made on a deep copy so that the caller's model, and every static result
+        derived from it, is untouched. The temporary nodes are named after the member they split so
+        that they cannot collide with the user's own names.
+
+        Restraining the analysis to a plane happens here too, for the same reason: the interior
+        nodes are created inside the analysis, so the caller has no opportunity to restrain them.
+
+        :param elements_per_member: The number of elements to subdivide each physical member into.
+        :type elements_per_member: int
+        :param plane: The plane to restrict the analysis to, or `None` for a full 3D analysis.
+        :type plane: str, optional
+        :return: A subdivided copy of this model
+        :rtype: FEModel3D
+        """
+
+        model = deepcopy(self)
+
+        # Track where nodes already are, so that subdividing two members that share geometry does
+        # not stack two nodes on the same point. A duplicated node produces a zero-length
+        # sub-member, which fails while building its transformation matrix.
+        occupied = {model._position_key(node.X, node.Y, node.Z) for node in model.nodes.values()}
+
+        # Step through each physical member the model started with. The dictionary is copied first
+        # because inserting nodes leaves the member collection itself unchanged, but taking a
+        # snapshot keeps the intent obvious.
+        for member in list(model.members.values()):
+
+            i_node, j_node = member.i_node, member.j_node
+
+            # Insert the interior nodes that split this member into equal elements. The end nodes
+            # already exist, so only the interior ones are added.
+            for element in range(1, elements_per_member):
+
+                # Interpolate linearly between the member's end nodes
+                t = element/elements_per_member
+                X = i_node.X + t*(j_node.X - i_node.X)
+                Y = i_node.Y + t*(j_node.Y - i_node.Y)
+                Z = i_node.Z + t*(j_node.Z - i_node.Z)
+
+                # Skip this point if a node is already sitting on it
+                key = model._position_key(X, Y, Z)
+
+                if key in occupied:
+                    continue
+
+                occupied.add(key)
+                model.add_node(f'_modal_{member.name}_{element}', X, Y, Z)
+
+        # Restrain the out-of-plane DOFs at every node once the interior nodes exist, so that a
+        # planar model stays planar through the subdivision
+        if plane is not None:
+
+            # The DOFs that carry out-of-plane motion for each analysis plane
+            out_of_plane = {'XY': ('DZ', 'RX', 'RY'),
+                            'XZ': ('DY', 'RX', 'RZ'),
+                            'YZ': ('DX', 'RY', 'RZ')}[plane]
+
+            for node in model.nodes.values():
+                for dof in out_of_plane:
+                    setattr(node, f'support_{dof}', True)
+
+        return model
+
+    @staticmethod
+    def _position_key(X: float, Y: float, Z: float) -> Tuple[float, float, float]:
+        """Returns a hashable key identifying a point, for spotting nodes that share a position.
+
+        This recognizes points that coincide exactly, which is the case that matters here:
+        subdivision points on members that share geometry are produced by the same arithmetic on
+        the same end coordinates, so they come out bit-identical.
+
+        :param X: The point's global X coordinate.
+        :type X: float
+        :param Y: The point's global Y coordinate.
+        :type Y: float
+        :param Z: The point's global Z coordinate.
+        :type Z: float
+        :return: A key that coincident points share
+        :rtype: Tuple[float, float, float]
+        """
+
+        return (X, Y, Z)
+
+    def _adopt_modal_results(self, model: FEModel3D, results: ModalResults) -> None:
+        """Copies modal results from a subdivided analysis copy back onto this model.
+
+        The mode shapes are stored as nodal displacements under the `Mode n` load combinations, so
+        only the nodes this model actually has are transferred. The full eigenvectors, including
+        the values at the temporary subdivision nodes, remain available on `results` along with the
+        DOF map and node coordinates needed to interpret them.
+
+        :param model: The subdivided copy the analysis was run on.
+        :type model: FEModel3D
+        :param results: The results produced on that copy.
+        :type results: ModalResults
+        """
+
+        # Recreate the modal load combinations on this model
+        to_remove = [name for name, combo in self.load_combos.items()
+                     if combo.combo_tags is not None and 'modal' in combo.combo_tags]
+
+        for name in to_remove:
+            self.load_combos.pop(name)
+
+        for mode in range(results.mode_count):
+            self.add_load_combo(f'Mode {mode + 1}', {}, ['modal'])
+
+        # Transfer the mode shapes for the nodes this model has, leaving the subdivision nodes to
+        # be read from `results` by anyone who wants them
+        for name, node in self.nodes.items():
+
+            source = model.nodes[name]
+
+            # Merge rather than replace, so that any static results already on this model survive
+            # a modal run
+            for dof in ('DX', 'DY', 'DZ', 'RX', 'RY', 'RZ'):
+                getattr(node, dof).update(getattr(source, dof))
+
+        self.frequencies = results.frequencies
+        self.solution = 'Modal'
+
+    def _analyze_modal_inner(self, num_modes, mass_combo_name, mass_direction, gravity, log,
+                             check_stability, mass_formulation, elements_per_member, plane,
+                             linear_state) -> ModalResults:
 
         # Prepare the model for analysis (same as other analysis methods)
         # This will generate the default load case ('Case 1') and load combo ('Combo 1') if none are present.
@@ -2585,29 +2955,53 @@ class FEModel3D():
             print('- Assembling global mass matrix')
 
         # Assemble and partition the global mass matrix
-        M_global = self.M(mass_combo_name, mass_direction, gravity, log, sparse=True).tocsr()
+        M_global = self.M(mass_combo_name, mass_direction, gravity, log, sparse=True,
+                          mass_formulation=mass_formulation).tocsr()
 
         # Partition to remove supported DOFs
         M11, M12, M21, M22 = Analysis._partition(self, M_global, D1_indices, D2_indices)
 
+        # Check that we have free DOFs to solve for at all
+        if K11.shape[0] == 0:
+            raise ModalModelError(
+                'Unable to perform modal analysis. Every degree of freedom in the model is '
+                'supported, so there is nothing free to vibrate.'
+            )
+
         # Check that we have mass terms
         if M11.nnz == 0:
-            raise Exception('No mass terms found. Ensure materials have density or provide mass_combo_name.')
+            raise ModalModelError(
+                'No mass terms found among the free degrees of freedom. Ensure materials have '
+                'density and their self-weight is in the mass combination, that the mass '
+                'combination contains loads that can be converted to mass, or that nodal point '
+                'masses have been assigned.'
+            )
 
         if log:
             print('- Solving eigenvalue problem')
 
-        try:
-            # Solve the generalized eigenvalue problem: [K11]{φ} = λ[M11]{φ}, where λ = ω²
-            # Or rewritten: (-[M11]ω² + [K11]){φ} = 0
-            # (See "Structural Dynamics for Structural Engineers" by Hart & Wong Equation 4.96)
-            eigenvalues, eigenvectors = sp.sparse.linalg.eigsh(A=K11, k=num_modes, M=M11, sigma=0.0, which='LM')
+        # Solve the eigenvalue problem, then discard the eigenpairs that are numerical artifacts
+        # rather than structural modes
+        eigenvalues, eigenvectors, solver, sigma = self._solve_modal_eigenproblem(K11, M11,
+                                                                                 num_modes, log)
 
-        except sp.linalg.LinAlgError as e:
-            raise Exception(f'Eigenvalue solution failed: {str(e)}. Check matrix conditioning.')
+        eigenvalues, eigenvectors, filtered = self._filter_modal_eigenpairs(
+            eigenvalues, eigenvectors, K11, M11, D1_indices
+        )
+
+        if eigenvalues.size == 0:
+            raise ModalModelError(
+                'No structural modes were found. Every eigenpair the solver returned was a '
+                'rigid-body or massless-DOF artifact, which means the model is a mechanism or its '
+                'mass is not attached to the degrees of freedom that can move.'
+            )
+
+        # Apply a deterministic sign convention so that repeated runs and renumbered models agree
+        fix_mode_shape_signs(eigenvectors, self._dof_coordinates(D1_indices))
 
         # Calculate frequencies in Hz from eigenvalues (λ = ω²)
-        frequencies = np.sqrt(eigenvalues) / (2 * np.pi)
+        omega = np.sqrt(eigenvalues)
+        frequencies = omega/(2*np.pi)
 
         if log:
             print('- Processing mode shapes')
@@ -2626,17 +3020,344 @@ class FEModel3D():
         # Store results in the model
         self.frequencies = frequencies
 
-        if log:
-            print('- Modal analysis complete')
-
         # Flag the model as having modal results
         self.solution = 'Modal'
+
+        # Assemble the structured result
+        stabilized = getattr(self, '_mass_stabilized_dofs', np.array([], dtype=int))
+
+        diagnostics = ModalDiagnostics(
+            requested_modes=num_modes,
+            converged_modes=int(frequencies.size),
+            solver=solver,
+            sigma=sigma,
+            mass_combo_name=mass_combo_name,
+            mass_direction=mass_direction,
+            gravity=gravity,
+            mass_formulation=mass_formulation,
+            elements_per_member=elements_per_member,
+            plane=plane,
+            linear_state=linear_state,
+            shear_deformation=self._has_shear_areas(),
+            stabilized_dof_count=int(np.size(stabilized)),
+            filtered_modes=filtered,
+        )
+
+        results = ModalResults(
+            frequencies=frequencies,
+            omega=omega,
+            eigenvalues=eigenvalues,
+            mode_shapes=eigenvectors,
+            free_dof_indices=np.asarray(D1_indices),
+            dof_map=self._dof_map(D1_indices),
+            M=M_global,
+            total_mass=self._total_mass(M_global),
+            participating_mass=self._total_mass(M_global, D1_indices),
+            mass_per_node=self._mass_per_node(M_global),
+            mesh_nodes={name: (node.X, node.Y, node.Z) for name, node in self.nodes.items()},
+            diagnostics=diagnostics,
+        )
 
         if log:
             print(f'- Found {len(frequencies)} modes')
             for i, freq in enumerate(frequencies):
                 print(f'  Mode {i + 1}: {freq:.3f} Hz')
+            if diagnostics.truncated:
+                print(f'- WARNING: {num_modes} modes were requested but only '
+                      f'{diagnostics.converged_modes} converged')
+            for index, reason in filtered:
+                print(f'- Filtered raw mode {index + 1}: {reason}')
             print('- Modal analysis complete')
+
+        return results
+
+    def _solve_modal_eigenproblem(self, K11, M11, num_modes: int, log: bool):
+        """Solves the generalized eigenvalue problem for the lowest modes of a matrix pencil.
+
+        Solves `[K11]{φ} = λ[M11]{φ}`, where `λ = ω²`. See "Structural Dynamics for Structural
+        Engineers" by Hart & Wong, Equation 4.96.
+
+        The sparse iterative solver cannot return as many modes as the problem has degrees of
+        freedom, so small models are sent to a dense solver instead of being allowed to fail.
+        Anything the sparse solver does return is used even if fewer modes converged than were
+        asked for; reporting a short result honestly is better than padding it.
+
+        The solve is made reproducible by fixing the sparse solver's starting vector, which it
+        would otherwise draw at random.
+
+        :param K11: The stiffness matrix partitioned down to the free DOFs.
+        :param M11: The mass matrix partitioned down to the free DOFs.
+        :param num_modes: The number of modes requested.
+        :type num_modes: int
+        :param log: Whether to print progress messages.
+        :type log: bool
+        :raises ModalSolverError: Occurs when neither solver can produce any modes.
+        :return: The eigenvalues, eigenvectors, the solver used, and the shift used
+        """
+
+        n_free = K11.shape[0]
+
+        # ARPACK needs to leave at least one dimension unconverged, so it cannot cover a small
+        # model. Fall straight through to the dense solver in that case.
+        if num_modes >= n_free - 1:
+
+            if log:
+                print(f'- Using the dense solver ({num_modes} modes requested of {n_free} free DOFs)')
+
+            return (*self._dense_eigenproblem(K11, M11, num_modes), 'dense', None)
+
+        # Characteristic eigenvalue of the pencil, used to size the fallback shift in the model's
+        # own units
+        reference = sp.sparse.linalg.norm(K11, 1)/sp.sparse.linalg.norm(M11, 1)
+
+        # Shifting at exactly zero factorizes K itself, which is singular for a model with
+        # rigid-body freedom. A small negative shift moves off that singularity while still landing
+        # far below the lowest structural mode, so rigid-body modes come back as near-zero
+        # eigenvalues and get filtered instead of crashing the factorization. `reference` is roughly
+        # the pencil's largest eigenvalue, so scaling by 1e-10 keeps the shift negligible against
+        # anything structural while staying well clear of round-off.
+        # ARPACK starts from a random vector unless given one, which makes repeated runs of the
+        # same model differ in the last few digits and flips mode shape signs between runs. A fixed
+        # starting vector makes the whole solve reproducible.
+        v0 = np.random.default_rng(0).standard_normal(n_free)
+
+        for sigma in (0.0, -1e-10*reference):
+
+            try:
+                eigenvalues, eigenvectors = sp.sparse.linalg.eigsh(A=K11, k=num_modes, M=M11,
+                                                                   sigma=sigma, which='LM', v0=v0)
+
+                return eigenvalues, eigenvectors, 'sparse-shift-invert', sigma
+
+            except sp.sparse.linalg.ArpackNoConvergence as e:
+
+                # Use whatever did converge rather than throwing the whole solve away. The caller
+                # finds out through `ModalDiagnostics.truncated`.
+                if e.eigenvalues is not None and e.eigenvalues.size > 0:
+
+                    if log:
+                        print(f'- Only {e.eigenvalues.size} of {num_modes} modes converged')
+
+                    return e.eigenvalues, e.eigenvectors, 'sparse-shift-invert', sigma
+
+                if log:
+                    print('- Sparse solver did not converge')
+
+                break
+
+            except (sp.sparse.linalg.ArpackError, RuntimeError, ValueError) as e:
+
+                # A singular factorization at a zero shift is what a model with rigid-body freedom
+                # looks like, so try the shifted solve before giving up on the sparse path
+                if sigma == 0.0:
+
+                    if log:
+                        print('- Zero-shift factorization failed, retrying with a small negative shift')
+
+                    continue
+
+                raise ModalSolverError(
+                    f'Eigenvalue solution failed: {e}. Check matrix conditioning.'
+                ) from e
+
+        # Neither sparse attempt produced modes. A dense solve is slower but far more forgiving.
+        if log:
+            print('- Retrying with the dense solver')
+
+        return (*self._dense_eigenproblem(K11, M11, num_modes), 'dense', None)
+
+    @staticmethod
+    def _dense_eigenproblem(K11, M11, num_modes: int):
+        """Solves the eigenvalue problem densely, returning the lowest `num_modes` eigenpairs.
+
+        :param K11: The stiffness matrix partitioned down to the free DOFs.
+        :param M11: The mass matrix partitioned down to the free DOFs.
+        :param num_modes: The number of modes requested. Fewer are returned if the problem is
+                          smaller than that.
+        :type num_modes: int
+        :raises ModalSolverError: Occurs when the dense solver fails.
+        :return: The eigenvalues and eigenvectors, ascending by eigenvalue
+        """
+
+        K_dense = K11.toarray() if sp.sparse.issparse(K11) else np.asarray(K11)
+        M_dense = M11.toarray() if sp.sparse.issparse(M11) else np.asarray(M11)
+
+        try:
+            eigenvalues, eigenvectors = sp.linalg.eigh(K_dense, M_dense)
+
+        except (sp.linalg.LinAlgError, np.linalg.LinAlgError) as e:
+            raise ModalSolverError(
+                f'Eigenvalue solution failed: {e}. The mass matrix may not be positive definite.'
+            ) from e
+
+        # `eigh` returns ascending eigenvalues, so the lowest modes are already first
+        keep = min(num_modes, eigenvalues.size)
+
+        return eigenvalues[:keep], eigenvectors[:, :keep]
+
+    def _filter_modal_eigenpairs(self, eigenvalues, eigenvectors, K11, M11, D1_indices):
+        """Discards eigenpairs that are numerical artifacts rather than structural modes.
+
+        Two kinds are removed. Rigid-body and mechanism modes sit at an eigenvalue of essentially
+        zero, judged against the characteristic eigenvalue of the pencil so that a genuinely soft
+        structure is not mistaken for one. Modes that live on DOFs which only carry the negligible
+        stabilization mass are pure artifacts of keeping the matrix solvable.
+
+        :param eigenvalues: The raw eigenvalues from the solver.
+        :param eigenvectors: The raw eigenvectors from the solver.
+        :param K11: The stiffness matrix partitioned down to the free DOFs.
+        :param M11: The mass matrix partitioned down to the free DOFs.
+        :param D1_indices: The global DOF index of each free DOF.
+        :return: The surviving eigenvalues and eigenvectors, plus `(index, reason)` for each
+                 eigenpair that was discarded
+        """
+
+        # Judge "essentially zero" against the largest eigenvalue actually computed, rather than
+        # against the whole pencil. The pencil's largest eigenvalue grows as the mesh is refined, so
+        # a fraction of it is not a fixed standard: on a refined model of a stiff material it can
+        # exceed a real fundamental eigenvalue and discard the very mode being looked for. The
+        # eigenvalues returned here are the lowest few, so the largest of them is a structural
+        # eigenvalue whenever any structural mode is present at all.
+        reference = float(np.max(np.abs(eigenvalues))) if np.size(eigenvalues) else 0.0
+
+        # Map the stabilized global DOFs onto positions within the free-DOF vector
+        stabilized = set(np.atleast_1d(getattr(self, '_mass_stabilized_dofs',
+                                               np.array([], dtype=int))).tolist())
+
+        free_positions = [i for i, dof in enumerate(D1_indices) if dof in stabilized]
+
+        keep = []
+        filtered = []
+
+        for i, eigenvalue in enumerate(eigenvalues):
+
+            # Rigid-body and mechanism modes. A structural mode of a stable model has strictly
+            # positive stiffness, so a non-positive eigenvalue is always one of these; the relative
+            # test then catches the ones that come back as a very small positive number.
+            if eigenvalue <= 0 or eigenvalue < 1e-8*reference:
+                filtered.append((i, f'rigid-body or mechanism mode (eigenvalue {eigenvalue:.4g})'))
+                continue
+
+            # Modes carried by DOFs that only have the stabilization mass. Because the eigenvectors
+            # are mass-normalized, the mass on those DOFs is directly the fraction of the mode's
+            # generalized mass that lives there.
+            if free_positions:
+
+                phi = eigenvectors[:, i]
+                share = float(phi[free_positions] @ (M11 @ phi)[free_positions])
+
+                if share > 0.99:
+                    filtered.append((i, f'mode of massless DOFs held up by the stabilization mass '
+                                        f'({100*share:.1f}% of its generalized mass)'))
+                    continue
+
+            keep.append(i)
+
+        return eigenvalues[keep], eigenvectors[:, keep], filtered
+
+    def _has_shear_areas(self) -> bool:
+        """Returns whether any member's section defines a shear area.
+
+        Modal analysis forces the Timoshenko formulation on, but the shear correction term is
+        skipped for a section whose shear area is zero, and zero is what `add_section` defaults to.
+        A model built without shear areas is therefore solved as Euler-Bernoulli despite the
+        forcing. Reporting this keeps the distinction visible, and warns of the day supplying shear
+        areas for some unrelated reason moves every modal frequency.
+
+        :return: Whether shear deformation is actually active anywhere in the model
+        :rtype: bool
+        """
+
+        for member in self.members.values():
+            if member.section.Asy or member.section.Asz:
+                return True
+
+        return False
+
+    def _dof_map(self, D1_indices) -> List[Tuple[str, str]]:
+        """Returns the `(node_name, dof)` pair for each free DOF, in solver order.
+
+        :param D1_indices: The global DOF index of each free DOF.
+        :return: The node name and degree of freedom each free DOF belongs to
+        :rtype: List[Tuple[str, str]]
+        """
+
+        # Index the nodes by their internal ID so the lookup below stays linear
+        by_id = {node.ID: name for name, node in self.nodes.items()}
+        dof_names = ('DX', 'DY', 'DZ', 'RX', 'RY', 'RZ')
+
+        return [(by_id[dof//6], dof_names[dof % 6]) for dof in D1_indices]
+
+    def _dof_coordinates(self, D1_indices) -> List[Tuple[float, float, float, int]]:
+        """Returns the `(X, Y, Z, dof)` key of each free DOF, for numbering-independent ordering.
+
+        :param D1_indices: The global DOF index of each free DOF.
+        :return: The position and degree of freedom of each free DOF
+        :rtype: List[Tuple[float, float, float, int]]
+        """
+
+        by_id = {node.ID: node for node in self.nodes.values()}
+
+        return [(by_id[dof//6].X, by_id[dof//6].Y, by_id[dof//6].Z, dof % 6) for dof in D1_indices]
+
+    def _total_mass(self, M_global, free_dofs=None) -> Dict[str, float]:
+        """Returns the assembled mass in each global direction.
+
+        A mass matrix's diagonal does not sum to the total mass once the formulation is consistent,
+        because mass is shared between coupled DOFs. The total is `rᵀMr` for a rigid unit
+        translation `r`, which is the mass the structure would present to a uniform acceleration.
+
+        Restricting to the free DOFs gives the *participating* mass instead: the mass that modes can
+        actually mobilize. Mass on a restrained DOF is held by the support and never appears in any
+        mode, so effective modal mass accumulates towards this rather than towards the total.
+
+        :param M_global: The assembled global mass matrix.
+        :param free_dofs: Restrict the sum to these DOFs. Pass the free-DOF indices for the
+                          participating mass, or `None` for the total.
+        :return: The mass, keyed by direction
+        :rtype: Dict[str, float]
+        """
+
+        totals = {}
+
+        # Partition down to the free DOFs once, rather than per direction
+        if free_dofs is None:
+            M = M_global
+        else:
+            M = M_global[free_dofs][:, free_dofs]
+
+        for offset, direction in enumerate('XYZ'):
+
+            # Unit rigid-body translation in this direction
+            r = np.zeros(M_global.shape[0])
+            r[offset::6] = 1.0
+
+            if free_dofs is not None:
+                r = r[free_dofs]
+
+            totals[direction] = float(r @ (M @ r))
+
+        return totals
+
+    def _mass_per_node(self, M_global) -> Dict[str, float]:
+        """Returns each node's share of the total mass.
+
+        This is the node's row sum over the translational mass block rather than its diagonal term,
+        so the shares add up to the total mass even for a consistent mass matrix. It is meant for
+        sanity-checking that the mass in the model is the mass the engineer intended.
+
+        :param M_global: The assembled global mass matrix.
+        :return: Each node's mass, keyed by node name
+        :rtype: Dict[str, float]
+        """
+
+        # Unit rigid-body translation in Y, whose row sums distribute the total mass over the nodes
+        r = np.zeros(M_global.shape[0])
+        r[1::6] = 1.0
+
+        Mr = np.asarray(M_global @ r).ravel()
+
+        return {name: float(Mr[node.ID*6 + 1]) for name, node in self.nodes.items()}
 
     def analyze_buckling(self, combo_name: str = 'Combo 1', num_modes: int = 5,
                          log: bool = False):
