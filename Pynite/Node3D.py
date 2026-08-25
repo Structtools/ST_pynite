@@ -76,6 +76,14 @@ class Node3D():
         self.EnforcedRY: float | None = None
         self.EnforcedRZ: float | None = None
 
+        # Initialize the explicit point mass and rotational inertia assigned to this node. These
+        # are real masses in the model's mass units, not forces, so they are independent of any
+        # load combination.
+        self.mass: float = 0.0
+        self.mass_IX: float = 0.0
+        self.mass_IY: float = 0.0
+        self.mass_IZ: float = 0.0
+
         # Initialize the color contour value for the node. This will be used for contour smoothing.
         self.contour: List[float] = []
 
@@ -123,14 +131,25 @@ class Node3D():
         else:
             total_mass = self._calc_mass(mass_combo_name, mass_direction, gravity)
 
+        # Add any explicit point mass assigned to this node. It is already a mass, so unlike the
+        # load-derived contribution above it is not divided by gravity or scaled by a load factor.
+        m[0, 0] += self.mass  # FX
+        m[1, 1] += self.mass  # FY
+        m[2, 2] += self.mass  # FZ
+
+        # Add any explicit rotational inertia assigned to this node
+        m[3, 3] += self.mass_IX  # RX
+        m[4, 4] += self.mass_IY  # RY
+        m[5, 5] += self.mass_IZ  # RZ
+
         # Check if there is any mass at this node
         if total_mass > 0:
 
             # Create lumped mass matrix for the node
             # Mass is distributed to translational DOFs only (standard practice)
-            m[0, 0] = total_mass  # FX
-            m[1, 1] = total_mass  # FY
-            m[2, 2] = total_mass  # FZ
+            m[0, 0] += total_mass  # FX
+            m[1, 1] += total_mass  # FY
+            m[2, 2] += total_mass  # FZ
 
             # Smart rotational inertia - only for free rotational DOFs
             # Use a small value based on mass and a characteristic length
@@ -139,11 +158,11 @@ class Node3D():
                 rotational_inertia = total_mass * (characteristic_length ** 2) * 0.01  # 1% scaling
 
                 if not self.support_RX:
-                    m[3, 3] = rotational_inertia
+                    m[3, 3] += rotational_inertia
                 if not self.support_RY:
-                    m[4, 4] = rotational_inertia
+                    m[4, 4] += rotational_inertia
                 if not self.support_RZ:
-                    m[5, 5] = rotational_inertia
+                    m[5, 5] += rotational_inertia
 
         return m
 

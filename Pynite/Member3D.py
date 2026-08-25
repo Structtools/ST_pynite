@@ -37,7 +37,7 @@ class Member3D():
     def __init__(self, model: FEModel3D, name: str, i_node: Node3D,
                  j_node: Node3D, material_name: str, section_name: str,
                  rotation: float = 0.0, tension_only: bool = False,
-                 comp_only: bool = False) -> None:
+                 comp_only: bool = False, beam_type: str = 'timoshenko') -> None:
         """
         Initializes a new member.
 
@@ -59,7 +59,12 @@ class Member3D():
         :type tension_only: bool, optional
         :param comp_only: Indicates if the member is compression-only, defaults to False
         :type comp_only: bool, optional
+        :param beam_type: Beam formulation: ``'timoshenko'`` (includes shear deformation) or ``'bernoulli'`` (Euler-Bernoulli). Default is ``'timoshenko'``.
+        :type beam_type: str, optional
         """
+
+        if beam_type not in ('timoshenko', 'bernoulli'):
+            raise ValueError(f"beam_type must be 'timoshenko' or 'bernoulli', got '{beam_type}'")
 
         self.name: str = name      # A unique name for the member given by the user
         self.ID: int | None = None        # Unique index number for the member assigned by the program
@@ -94,6 +99,8 @@ class Member3D():
         self.Releases: List[bool] = [False, False, False, False, False, False, False, False, False, False, False, False]
         self.tension_only: bool = tension_only  # Indicates whether the member is tension-only
         self.comp_only: bool = comp_only  # Indicates whether the member is compression-only
+        self.beam_type: str = beam_type  # 'timoshenko' or 'bernoulli'
+        self._force_timoshenko: bool = False  # Internal flag: overrides beam_type for eigenvalue analysis
 
         # Members need to track whether they are active or not for any given load combination. They may become inactive for a load combination during a tension/compression-only analysis. This dictionary will be used when the model is solved.
         self.active: Dict[str, bool] = {}  # Key = load combo name, Value = True or False
@@ -103,6 +110,12 @@ class Member3D():
 
         # Members need a link to the model they belong to
         self.model: FEModel3D = model
+
+    @property
+    def _use_timoshenko(self) -> bool:
+        """Whether to include shear deformation (Timoshenko) in stiffness calculations.
+        Returns True when beam_type is 'timoshenko' or when forced for eigenvalue analysis."""
+        return self.beam_type == 'timoshenko' or self._force_timoshenko
 
 # %%
     def __repr__(self) -> str:
@@ -190,19 +203,31 @@ class Member3D():
         A = self.section.A
         L = self.L()
 
-        # Create the uncondensed local stiffness matrix
-        ke = array([[A*E/L,  0,             0,             0,      0,            0,            -A*E/L, 0,             0,             0,      0,            0           ],
-                   [0,      12*E*Iz/L**3,  0,             0,      0,            6*E*Iz/L**2,  0,      -12*E*Iz/L**3, 0,             0,      0,            6*E*Iz/L**2 ],
-                   [0,      0,             12*E*Iy/L**3,  0,      -6*E*Iy/L**2, 0,            0,      0,             -12*E*Iy/L**3, 0,      -6*E*Iy/L**2, 0           ],
-                   [0,      0,             0,             G*J/L,  0,            0,            0,      0,             0,             -G*J/L, 0,            0           ],
-                   [0,      0,             -6*E*Iy/L**2,  0,      4*E*Iy/L,     0,            0,      0,             6*E*Iy/L**2,   0,      2*E*Iy/L,     0           ],
-                   [0,      6*E*Iz/L**2,   0,             0,      0,            4*E*Iz/L,     0,      -6*E*Iz/L**2,  0,             0,      0,            2*E*Iz/L    ],
-                   [-A*E/L, 0,             0,             0,      0,            0,            A*E/L,  0,             0,             0,      0,            0           ],
-                   [0,      -12*E*Iz/L**3, 0,             0,      0,            -6*E*Iz/L**2, 0,      12*E*Iz/L**3,  0,             0,      0,            -6*E*Iz/L**2],
-                   [0,      0,             -12*E*Iy/L**3, 0,      6*E*Iy/L**2,  0,            0,      0,             12*E*Iy/L**3,  0,      6*E*Iy/L**2,  0           ],
-                   [0,      0,             0,             -G*J/L, 0,            0,            0,      0,             0,             G*J/L,  0,            0           ],
-                   [0,      0,             -6*E*Iy/L**2,  0,      2*E*Iy/L,     0,            0,      0,             6*E*Iy/L**2,   0,      4*E*Iy/L,     0           ],
-                   [0,      6*E*Iz/L**2,   0,             0,      0,            2*E*Iz/L,     0,      -6*E*Iz/L**2,  0,             0,      0,            4*E*Iz/L    ]])
+        # Timoshenko shear deformation parameters
+        # Phi_y corresponds to bending about the y-axis (using Iy, shear area Asz)
+        # Phi_z corresponds to bending about the z-axis (using Iz, shear area Asy)
+        Asy = self.section.Asy
+        Asz = self.section.Asz
+        if self._use_timoshenko:
+            Phi_y = 12 * E * Iy / (G * Asz * L**2) if Asz else 0.0
+            Phi_z = 12 * E * Iz / (G * Asy * L**2) if Asy else 0.0
+        else:
+            Phi_y = 0.0
+            Phi_z = 0.0
+
+        # Create the uncondensed local stiffness matrix (Timoshenko beam)
+        ke = array([[A*E/L,  0,                            0,                            0,      0,                            0,                            -A*E/L, 0,                             0,                            0,      0,                            0                            ],
+                    [0,      12*E*Iz/(L**3*(1+Phi_z)),     0,                            0,      0,                            6*E*Iz/(L**2*(1+Phi_z)),      0,      -12*E*Iz/(L**3*(1+Phi_z)),     0,                            0,      0,                            6*E*Iz/(L**2*(1+Phi_z))      ],
+                    [0,      0,                            12*E*Iy/(L**3*(1+Phi_y)),     0,      -6*E*Iy/(L**2*(1+Phi_y)),     0,                            0,      0,                             -12*E*Iy/(L**3*(1+Phi_y)),    0,      -6*E*Iy/(L**2*(1+Phi_y)),     0                            ],
+                    [0,      0,                            0,                            G*J/L,  0,                            0,                            0,      0,                             0,                            -G*J/L, 0,                            0                            ],
+                    [0,      0,                            -6*E*Iy/(L**2*(1+Phi_y)),     0,      (4+Phi_y)*E*Iy/(L*(1+Phi_y)), 0,                            0,      0,                             6*E*Iy/(L**2*(1+Phi_y)),      0,      (2-Phi_y)*E*Iy/(L*(1+Phi_y)), 0                            ],
+                    [0,      6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (4+Phi_z)*E*Iz/(L*(1+Phi_z)), 0,      -6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (2-Phi_z)*E*Iz/(L*(1+Phi_z)) ],
+                    [-A*E/L, 0,                            0,                            0,      0,                            0,                            A*E/L,  0,                             0,                            0,      0,                            0                            ],
+                    [0,      -12*E*Iz/(L**3*(1+Phi_z)),    0,                            0,      0,                            -6*E*Iz/(L**2*(1+Phi_z)),     0,      12*E*Iz/(L**3*(1+Phi_z)),      0,                            0,      0,                            -6*E*Iz/(L**2*(1+Phi_z))     ],
+                    [0,      0,                            -12*E*Iy/(L**3*(1+Phi_y)),    0,      6*E*Iy/(L**2*(1+Phi_y)),      0,                            0,      0,                             12*E*Iy/(L**3*(1+Phi_y)),     0,      6*E*Iy/(L**2*(1+Phi_y)),      0                            ],
+                    [0,      0,                            0,                            -G*J/L, 0,                            0,                            0,      0,                             0,                            G*J/L,  0,                            0                            ],
+                    [0,      0,                            -6*E*Iy/(L**2*(1+Phi_y)),     0,      (2-Phi_y)*E*Iy/(L*(1+Phi_y)), 0,                            0,      0,                             6*E*Iy/(L**2*(1+Phi_y)),      0,      (4+Phi_y)*E*Iy/(L*(1+Phi_y)), 0                            ],
+                    [0,      6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (2-Phi_z)*E*Iz/(L*(1+Phi_z)), 0,      -6*E*Iz/(L**2*(1+Phi_z)),      0,                            0,      0,                            (4+Phi_z)*E*Iz/(L*(1+Phi_z)) ]])
 
         # Return the uncondensed local stiffness matrix
         return ke
@@ -336,7 +361,8 @@ class Member3D():
             # Solve for `km` using a psuedo-inverse (pinv). The psuedo-inverse takes into account that we may have rows of zeros that make the matrix otherwise uninvertable.
             return -keg @ G @ pinv(G.T @ keg @ G) @ G.T @ keg
 
-    def _m_unc(self, mass_combo_name: str, mass_direction: str = 'Y', gravity: float = 1.0) -> NDArray[float64]:
+    def _m_unc(self, mass_combo_name: str, mass_direction: str = 'Y', gravity: float = 1.0,
+               mass_formulation: str = 'consistent') -> NDArray[float64]:
         """
         Returns the uncondensed mass matrix for the member in local coordinates.
 
@@ -346,20 +372,69 @@ class Member3D():
         :type mass_direction: str, optional
         :param gravity: The acceleration due to gravity. Defaults to 1.0. In most cases you'll want to change this to be in units consistent with your model.
         :type gravity: float
+        :param mass_formulation: How load-derived mass is distributed: `'consistent'` (default) or
+                                 `'lumped'`. Self-weight always uses the consistent formulation.
+        :type mass_formulation: str, optional
+        :raises ValueError: Occurs if `mass_formulation` is not `'consistent'` or `'lumped'`.
         :return: The uncondensed local mass matrix
         :rtype: NDArray[float64]
         """
 
-        # Calculate the non-material load-based mass from the load combination
-        load_mass, x = self._calc_load_mass(mass_combo_name, mass_direction, gravity)
+        # Collect the non-material load-based mass from the load combination
+        pt_masses, dist_masses = self._load_mass_items(mass_combo_name, mass_direction, gravity)
 
-        # Calculate the lumped mass from the loads, and the consitent mass from the self-weight loads
-        lumped_mass = self.lumped_m(load_mass, x)
+        if mass_formulation == 'consistent':
+
+            # Interpolate the load mass onto every DOF, including the rotational ones
+            load_mass = self.consistent_load_m(pt_masses, dist_masses)
+
+        elif mass_formulation == 'lumped':
+
+            # Collapse the load mass onto the end nodes' translational DOFs only
+            load_mass = zeros((12, 12))
+
+            for mass, x in pt_masses:
+                load_mass += self.lumped_m(mass, x)
+
+            for mu1, mu2, x1, x2 in dist_masses:
+
+                # Skip loads of zero length, which contribute nothing
+                length = x2 - x1
+                if length <= 0:
+                    continue
+
+                # Lump the load's mass at its own center of gravity
+                mass = (mu1 + mu2)/2*length
+                load_mass += self.lumped_m(mass, x1 + length*(mu1 + 2*mu2)/(3*(mu1 + mu2)))
+
+        else:
+            raise ValueError(
+                f"`mass_formulation` must be 'consistent' or 'lumped'. '{mass_formulation}' was given."
+            )
+
+        # Add the consistent mass from the self-weight loads
         material_mass = self.consistent_m(mass_combo_name, gravity)
 
-        return lumped_mass + material_mass
+        return load_mass + material_mass
 
     def consistent_m(self, mass_combo_name, gravity: float = 1.0) -> NDArray[float64]:
+        """Returns the consistent mass matrix for the member's self-mass in local coordinates.
+
+        Self-mass is built from the self-weight loads in the mass combination rather than from the
+        material density alone, so a member whose self-weight is not in the mass combination
+        contributes no self-mass even if its material has a density.
+
+        Only the *magnitude* of the density matters. A negative `rho` is a legitimate way to express
+        a downward self-weight load, and it carries the same mass as the equivalent positive density
+        with a negative load factor. See `add_material` for the full sign contract.
+
+        :param mass_combo_name: Load combination name defining which self-weight loads count.
+        :type mass_combo_name: str
+        :param gravity: The acceleration due to gravity. Defaults to 1.0.
+        :type gravity: float, optional
+        :return: The member's self-mass matrix in local coordinates
+        :rtype: NDArray[float64]
+        """
 
         # Get the section properties needed to form the local mass matrix
         J = self.section.J
@@ -384,9 +459,17 @@ class Member3D():
                 # Find the load factor the user has specified for this load
                 factor = mass_combo.factors[case]
 
-                # Calculate the factored mass
-                rho = self.material.rho
-                material_mass += factor*rho*L*A/gravity
+                # Calculate the factored mass from the load itself rather than recomputing it from
+                # the density. The load already carries `rho*A` times whatever factor was given to
+                # `add_member_self_weight`, so reading it back here picks that factor up: a member
+                # whose self-weight was raised by 15% to account for connections carries 15% more
+                # mass, instead of the extra weight showing up statically but not dynamically.
+                #
+                # The magnitude is taken per contribution rather than after summation. Mass is not a
+                # signed quantity, and the sign here carries only the direction of the self-weight
+                # load, so accumulating signed values would let two self-weight cases of opposing
+                # sign cancel and understate the self-mass.
+                material_mass += abs(factor*(w1 + w2)/2*(x2 - x1)/gravity)
 
         # Consistent mass matrix for 3D beam element
         #   [dxi     dyi     dzi      rxi      ryi      rzi      dxj  dyj     dzj    rxj      ryj      rzj   ]
@@ -416,14 +499,115 @@ class Member3D():
         # print(f"DEBUG: Expected sum for 2 nodes = 420")
         # print(f"DEBUG: Ratio = {trans_coeff_sum/420:.3f}")
 
-        m = m_coeff*(abs(material_mass)/420)
+        # `material_mass` is already non-negative, having been accumulated as magnitudes above
+        m = m_coeff*(material_mass/420)
 
         return m
 
-    def lumped_m(self, load_mass, x) -> NDArray[float64]:
+    # Five-point Gauss-Legendre abscissae and weights mapped onto [0, 1]. The integrand used for
+    # distributed mass is `mu(x)*N.T @ N`, which reaches degree 7 (cubic shape functions squared
+    # times a linearly varying mass intensity), so five points integrate it exactly.
+    _GAUSS_XI = array([0.046910077030668, 0.230765344947158, 0.500000000000000,
+                       0.769234655052842, 0.953089922969332])
+    _GAUSS_W = array([0.118463442528095, 0.239314335249683, 0.284444444444444,
+                      0.239314335249683, 0.118463442528095])
+
+    def _shape_matrix(self, xi: float) -> NDArray[float64]:
+        """Returns the 3x12 translational shape function matrix at the normalized position `xi`.
+
+        Row 0 maps the member's DOFs to local x-translation (linear), and rows 1 and 2 map them to
+        local y- and z-translation using the same cubic Hermitian functions the consistent mass
+        matrix of `consistent_m` is built from. The sign convention matches too: a positive `ry`
+        rotation produces a negative local z-slope.
+
+        :param xi: Position along the member, normalized to its length.
+        :type xi: float
+        :return: The translational shape function matrix
+        :rtype: NDArray[float64]
+        """
+
+        L = self.L()
+
+        # Hermitian interpolation functions for transverse translation
+        H1 = 1 - 3*xi**2 + 2*xi**3
+        H2 = L*(xi - 2*xi**2 + xi**3)
+        H3 = 3*xi**2 - 2*xi**3
+        H4 = L*(-xi**2 + xi**3)
+
+        N = zeros((3, 12))
+
+        # Local x-translation varies linearly between the two end nodes
+        N[0, 0] = 1 - xi
+        N[0, 6] = xi
+
+        # Local y-translation (bending about the local z-axis)
+        N[1, 1] = H1
+        N[1, 5] = H2
+        N[1, 7] = H3
+        N[1, 11] = H4
+
+        # Local z-translation (bending about the local y-axis)
+        N[2, 2] = H1
+        N[2, 4] = -H2
+        N[2, 8] = H3
+        N[2, 10] = -H4
+
+        return N
+
+    def consistent_load_m(self, pt_masses: List[Tuple[float, float]],
+                          dist_masses: List[Tuple[float, float, float, float]]) -> NDArray[float64]:
+        """Returns the consistent mass matrix for load-derived mass in local coordinates.
+
+        A mass `m` riding on the member at normalized position `xi` contributes `m*N.T @ N`. That
+        is exact for a point mass, it populates the rotational DOFs, and it reproduces the total
+        mass exactly because the translational shape functions sum to unity. Distributed mass is
+        integrated the same way, so no load center of gravity has to be estimated.
+
+        :param pt_masses: Point masses as `(mass, x)` pairs, with `x` measured along the member.
+        :type pt_masses: List[Tuple[float, float]]
+        :param dist_masses: Distributed masses as `(mu1, mu2, x1, x2)` tuples, where `mu1` and
+                            `mu2` are the mass per unit length at each end of the loaded length.
+        :type dist_masses: List[Tuple[float, float, float, float]]
+        :return: The load-derived consistent mass matrix
+        :rtype: NDArray[float64]
+        """
+
+        L = self.L()
+        m = zeros((12, 12))
+
+        # Each point mass contributes at its own position along the member
+        for mass, x in pt_masses:
+            N = self._shape_matrix(x/L)
+            m += mass*(N.T @ N)
+
+        # Distributed mass is integrated over the loaded length
+        for mu1, mu2, x1, x2 in dist_masses:
+
+            # Skip loads of zero length, which contribute nothing
+            length = x2 - x1
+            if length <= 0:
+                continue
+
+            # Accumulate the quadrature contributions across the loaded length
+            for xi_g, w_g in zip(self._GAUSS_XI, self._GAUSS_W):
+
+                # Position of this integration point and the mass intensity there
+                x = x1 + xi_g*length
+                mu = mu1 + (mu2 - mu1)*xi_g
+
+                N = self._shape_matrix(x/L)
+                m += w_g*length*mu*(N.T @ N)
+
+        return m
+
+    def lumped_m(self, load_mass: float, x: float) -> NDArray[float64]:
         """Lumps the load's mass to each end node based on its position, `x`.
 
-        :param load_mass: The member's total massp from loads.
+        This is the cheaper counterpart to `consistent_load_m` and generally underestimates the
+        natural frequencies. It leaves the rotational DOFs empty, so a model whose mass comes only
+        from this path has a singular mass matrix and relies on the shift-invert eigensolver.
+
+        :param load_mass: The member's total mass from loads.
         :type load_mass: float
         :param x: The location of the load mass along the member.
         :type x: float
@@ -435,9 +619,8 @@ class Member3D():
         L = self.L()
         m = zeros((12, 12))
 
-        # Distribute half mass to each node's translational DOFs
-        # TODO: Distribute the mass based on distance from each load instead
-        i_node_mass = load_mass*(1 - x)/L
+        # Split the mass between the end nodes so that it stays statically equivalent
+        i_node_mass = load_mass*(L - x)/L
         j_node_mass = load_mass*x/L
         m[0, 0] = i_node_mass   # FX i-node
         m[1, 1] = i_node_mass   # FY i-node
@@ -446,23 +629,134 @@ class Member3D():
         m[7, 7] = j_node_mass   # FY j-node
         m[8, 8] = j_node_mass   # FZ j-node
 
-        # Add rotational inertia for the mass
-        # Calculate the rotational inertia: I = m*x²
-        i_node_rot_inertia = i_node_mass*x**2
-        j_node_rot_inertia = j_node_mass*(L - x)**2
-
-        # Apply rotational inertia about the major and minor axes
-        # There is no rotational inertia about the torsional axis (zero lever arm)
-        # Any numerical instability from zeros in the torsional direction will be fixed by the global solver
-        m[4, 4] = i_node_rot_inertia    # RZ i-node
-        m[5, 5] = i_node_rot_inertia    # RZ i-node
-
-        m[10, 10] = j_node_rot_inertia    # RZ j-node
-        m[11, 11] = j_node_rot_inertia  # RZ j-node
+        # A mass lumped onto a node has no lever arm about that node, so the rotational DOFs stay
+        # empty. Use the consistent formulation if rotational inertia matters.
 
         return m
 
-    def _calc_load_mass(self, mass_combo_name: str, mass_direction: str = 'Y', gravity: float = 1.0) -> float:
+    def _mass_component(self, load_dir: str, value: float, m_vector: NDArray[float64]) -> float:
+        """Returns the component of a load acting in the mass direction.
+
+        :param load_dir: The load's direction, either local (`'Fx'`, `'Fy'`, `'Fz'`) or global
+                         (`'FX'`, `'FY'`, `'FZ'`). Moments carry no mass and return zero.
+        :type load_dir: str
+        :param value: The magnitude of the load.
+        :type value: float
+        :param m_vector: Unit vector for the direction mass is being collected in.
+        :type m_vector: NDArray[float64]
+        :return: The component of the load acting in the mass direction
+        :rtype: float
+        """
+
+        # Resolve the load into global coordinates
+        if load_dir in ('Fx', 'Fy', 'Fz'):
+
+            # Local directions rotate into global coordinates through the transposed direction
+            # cosine matrix
+            v_local = zeros(3)
+            v_local['xyz'.index(load_dir[1])] = value
+            v_global = self.T()[:3, :3].T @ v_local
+
+        elif load_dir in ('FX', 'FY', 'FZ'):
+
+            # Global directions are already in the frame we need
+            v_global = zeros(3)
+            v_global['XYZ'.index(load_dir[1])] = value
+
+        else:
+
+            # Moments and any other direction carry no translational mass
+            return 0.0
+
+        return float(dot(v_global, m_vector))
+
+    def _load_mass_items(self, mass_combo_name: str, mass_direction: str = 'Y',
+                         gravity: float = 1.0) -> Tuple[List[Tuple[float, float]],
+                                                        List[Tuple[float, float, float, float]]]:
+        """Returns this member's load-derived mass as `(point_masses, distributed_masses)`.
+
+        Point masses come back as `(mass, x)` pairs and distributed masses as
+        `(mu1, mu2, x1, x2)` tuples holding the mass per unit length at each end of the loaded
+        length. Mass is always positive: an upward load carries mass just as a downward one does.
+        A load that reverses sign along its length has each end taken separately, so the intensity
+        between them is interpolated between two positive values.
+
+        Self-weight loads are skipped here. They are built from the material density by
+        `consistent_m` instead, so that they are not counted twice.
+
+        :param mass_combo_name: Name of the load combination to use for mass calculation.
+        :type mass_combo_name: str
+        :param mass_direction: Direction to collect mass in: `'X'`, `'Y'`, or `'Z'`. Defaults to `'Y'`.
+        :type mass_direction: str, optional
+        :param gravity: The acceleration due to gravity used for load to mass conversion. Defaults to 1.0.
+        :type gravity: float, optional
+        :raises NameError: Occurs if `mass_combo_name` is invalid.
+        :raises ValueError: Occurs if `mass_direction` is not `'X'`, `'Y'`, or `'Z'`.
+        :return: The member's point masses and distributed masses
+        :rtype: Tuple[List[Tuple[float, float]], List[Tuple[float, float, float, float]]]
+        """
+
+        # Get the mass load combination
+        try:
+            mass_combo = self.model.load_combos[mass_combo_name]
+        except KeyError:
+            raise NameError(f"No load combination named '{mass_combo_name}'")
+
+        # Define the unit vector for the mass direction
+        if mass_direction == 'X':
+            m_vector = array([1.0, 0.0, 0.0])
+        elif mass_direction == 'Y':
+            m_vector = array([0.0, 1.0, 0.0])
+        elif mass_direction == 'Z':
+            m_vector = array([0.0, 0.0, 1.0])
+        else:
+            raise ValueError(f"`mass_direction` must be 'X', 'Y', or 'Z'. '{mass_direction}' was given.")
+
+        pt_masses: List[Tuple[float, float]] = []
+        dist_masses: List[Tuple[float, float, float, float]] = []
+
+        # Point loads become point masses at their own position along the member
+        for pt_load in self.PtLoads:
+
+            # Retrieve the load's components for clearer reference below
+            load_dir, P, x, load_case = pt_load
+
+            # Step through each load case and load factor in the mass load combo
+            for case, factor in mass_combo.factors.items():
+
+                # Check if this point load is used in this load combo
+                if load_case == case:
+
+                    P_comp = self._mass_component(load_dir, factor*P, m_vector)
+
+                    if P_comp != 0.0:
+                        pt_masses.append((abs(P_comp)/gravity, x))
+
+        # Distributed loads become distributed mass over their loaded length
+        for dist_load in self.DistLoads:
+
+            # Retrieve the load's components for clearer reference below
+            load_dir, w1, w2, x1, x2, load_case, self_weight = dist_load
+
+            # Self-weight is handled by the consistent material mass matrix instead
+            if self_weight:
+                continue
+
+            # Step through each load case and load factor in the mass load combo
+            for case, factor in mass_combo.factors.items():
+
+                # Check if this distributed load is used in this load combo
+                if load_case == case:
+
+                    w1_comp = self._mass_component(load_dir, factor*w1, m_vector)
+                    w2_comp = self._mass_component(load_dir, factor*w2, m_vector)
+
+                    if w1_comp != 0.0 or w2_comp != 0.0:
+                        dist_masses.append((abs(w1_comp)/gravity, abs(w2_comp)/gravity, x1, x2))
+
+        return pt_masses, dist_masses
+
+    def _calc_load_mass(self, mass_combo_name: str, mass_direction: str = 'Y', gravity: float = 1.0) -> List[float]:
         """ Calculates the total mass from a load combination in a specific local direction.
 
         :param mass_combo_name: Name of the load combination to use for mass calculation.
@@ -476,133 +770,39 @@ class Member3D():
         :rtype: List[float, float]
         """
 
-        # Get the mass load combination
-        try:
-            mass_combo = self.model.load_combos[mass_combo_name]
-        except KeyError:
-            raise NameError(f"No load combination named '{mass_combo_name}'")
+        pt_masses, dist_masses = self._load_mass_items(mass_combo_name, mass_direction, gravity)
 
-        # Initialize the total force to zero
-        sum_force = 0.0
-        sum_force_x = 0.0
+        # Initialize the mass and its first moment about the i-node to zero
+        total_mass = 0.0
+        first_moment = 0.0
 
-        # Get the transformation matrix once for efficiency
-        T_local = self.T()[:3, :3]  # 3x3 rotation matrix
+        # Accumulate the point masses
+        for mass, x in pt_masses:
+            total_mass += mass
+            first_moment += mass*x
 
-        # Define vector for the mass direction
-        if mass_direction == 'X':
-            m_vector = array([1.0, 0.0, 0.0])
-        elif mass_direction == 'Y':
-            m_vector = array([0.0, 1.0, 0.0])
-        elif mass_direction == 'Z':
-            m_vector = array([0.0, 0.0, 1.0])
+        # Accumulate the distributed masses, integrating the linearly varying intensity
+        for mu1, mu2, x1, x2 in dist_masses:
 
-        # Sum forces from point loads
-        # Step through each point load in the member
-        for pt_load in self.PtLoads:
+            # Skip loads of zero length, which contribute nothing
+            length = x2 - x1
+            if length <= 0:
+                continue
 
-            # Step through each load case and load factor in the mass load combo
-            for case, factor in mass_combo.factors.items():
+            mass = (mu1 + mu2)/2*length
+            total_mass += mass
+            first_moment += x1*mass + length**2*(mu1/6 + mu2/3)
 
-                # Retrive the load's components for clearer reference below
-                load_dir, P, x, load_case = pt_load
-
-                # Check if this point load is used in this load combo
-                if load_case == case:
-
-                    # Convert the point load to a global vector
-                    if load_dir == 'Fx':
-                        P_global = T_local.T() @ array([P, 0, 0]) @ T_local
-                        P_global = T_local.T() @ array([P, 0, 0]) @ T_local
-                    elif load_dir == 'Fy':
-                        P_global = T_local.T() @ array([0, P, 0]) @ T_local
-                        P_global = T_local.T() @ array([0, P, 0]) @ T_local
-                    elif load_dir == 'Fz':
-                        P_global = T_local.T() @ array([0, 0, P]) @ T_local
-                        P_global = T_local.T() @ array([0, 0, P]) @ T_local
-                    elif load_dir == 'FX':
-                        P_global = array([P, 0, 0])
-                        P_global = array([P, 0, 0])
-                    elif load_dir == 'FY':
-                        P_global = array([0, P, 0])
-                        P_global = array([0, P, 0])
-                    elif load_dir == 'FZ':
-                        P_global = array([0, 0, P])
-                        P_global = array([0, 0, P])
-                    else:
-                        # Assume zero for any other load directions
-                        P_global = array([0, 0, 0])
-
-                    # Calculate the load component acting in the mass direction
-                    P_m_comp = dot(P_global, m_vector)
-
-                    # Sum the total for the load component
-                    sum_force += factor*P_m_comp
-                    sum_force_x += factor*P_m_comp*x
-
-        # Sum forces from distributed loads
-        for dist_load in self.DistLoads:
-
-            # Retrive the load's components for clearer reference below
-            load_dir, w1, w2, x1, x2, load_case, self_weight = dist_load
-
-            # Don't add masses for self-weight loads. They will be added elsewhere using a consistent mass matrix, rather than a lumped mass matrix
-            if not self_weight:
-
-                # Step through each load case and factor in the mass combo
-                for case, factor in mass_combo.factors.items():
-
-                    # Check if this load's case is in the mass combo
-                    if load_case == case:
-
-                        # Calculate the length of the distributed load
-                        length_loaded = x2 - x1
-
-                        # Convert the distributed load to a global vector
-                        if load_dir == 'Fx':
-                            w1_global = T_local.T() @ array([w1, 0, 0]) @ T_local
-                            w2_global = T_local.T() @ array([w2, 0, 0]) @ T_local
-                        elif load_dir == 'Fy':
-                            w1_global = T_local.T() @ array([0, w1, 0]) @ T_local
-                            w2_global = T_local.T() @ array([0, w2, 0]) @ T_local
-                        elif load_dir == 'Fz':
-                            w1_global = T_local.T() @ array([0, 0, w1]) @ T_local
-                            w2_global = T_local.T() @ array([0, 0, w2]) @ T_local
-                        elif load_dir == 'FX':
-                            w1_global = array([w1, 0, 0])
-                            w2_global = array([w2, 0, 0])
-                        elif load_dir == 'FY':
-                            w1_global = array([0, w1, 0])
-                            w2_global = array([0, w2, 0])
-                        elif load_dir == 'FZ':
-                            w1_global = array([0, 0, w1])
-                            w2_global = array([0, 0, w2])
-                        else:
-                            # Assume zero for any other load directions
-                            w1_global = array([0, 0, 0])
-                            w2_global = array([0, 0, 0])
-
-                        # Calculate the load component acting in the mass direction
-                        w1_m_comp = dot(w1_global, m_vector)
-                        w2_m_comp = dot(w2_global, m_vector)
-
-                        # Sum the average for the load component
-                        avg_load = (w1_m_comp + w2_m_comp)/2
-                        sum_force += factor*avg_load*length_loaded
-
-                        # Identify the point through which the load acts
-                        sum_force_x += factor*avg_load*(w2 - w1)*(w1_m_comp*(x2 - x1)**2/2
-                                                                  + 0.5*(w2_m_comp - w1_m_comp)*(x2 - x1)**2*(2/3))
-
-        # Identify the load's center of gravity
-        if sum_force_x != 0.0:
-            total_x = sum_force_x/sum_force
+        # Identify the load's center of gravity, defaulting to midspan when there is no mass
+        if total_mass != 0.0:
+            total_x = first_moment/total_mass
         else:
             total_x = self.L()/2
 
-        return [abs(sum_force/gravity), total_x]  # Mass is always positive
+        return [total_mass, total_x]
 
-    def m(self, mass_combo_name: str, mass_direction: str = 'Y', gravity: float = 1.0) -> NDArray[Any]:
+    def m(self, mass_combo_name: str, mass_direction: str = 'Y', gravity: float = 1.0,
+          mass_formulation: str = 'consistent') -> NDArray[Any]:
         """
         Returns the condensed (and expanded) local mass matrix for the member. Condensing the matrix is used to account for member end releases.
 
@@ -611,6 +811,9 @@ class Member3D():
         :type mass_direction: str, optional
         :param gravity: Acceleration due to gravity. Default is 1.0.
         :type gravity: float, optional
+        :param mass_formulation: How load-derived mass is distributed: `'consistent'` (default) or
+                                 `'lumped'`.
+        :type mass_formulation: str, optional
         :return: The condensed local mass matrix
         :rtype: ndarray
         """
@@ -619,14 +822,14 @@ class Member3D():
         if True not in self.Releases:
 
             # If no releases, return the full uncondensed mass matrix
-            return self._m_unc(mass_combo_name, mass_direction, gravity)
+            return self._m_unc(mass_combo_name, mass_direction, gravity, mass_formulation)
 
         # Partition the local mass matrix as 4 submatrices in
         # preparation for static condensation (same as stiffness matrix)
         R1_indices, R2_indices = self._partition_D()
 
         # Get the uncondensed mass matrix
-        m_unc = self._m_unc(mass_combo_name, mass_direction, gravity)
+        m_unc = self._m_unc(mass_combo_name, mass_direction, gravity, mass_formulation)
 
         # Partition the mass matrix
         m11 = m_unc[R1_indices, :][:, R1_indices]
@@ -645,7 +848,8 @@ class Member3D():
 
         return m_expanded
 
-    def M(self, mass_combo_name: str | None = None, mass_direction: str = 'Y', gravity: float = 1.0) -> NDArray[Any]:
+    def M(self, mass_combo_name: str | None = None, mass_direction: str = 'Y', gravity: float = 1.0,
+          mass_formulation: str = 'consistent') -> NDArray[Any]:
         """Returns the member's global mass matrix.
 
         The mass is created from loads in the mass combination.
@@ -654,12 +858,15 @@ class Member3D():
         :type mass_combo_name: str, optional
         :param mass_direction: Direction for load-to-mass conversion ('X', 'Y', or 'Z'). Any loads applied in this direction (positive or negative) will be converted to mass. Default is 'Y'.
         :type mass_direction: str, optional
+        :param mass_formulation: How load-derived mass is distributed: `'consistent'` (default) or
+                                 `'lumped'`.
+        :type mass_formulation: str, optional
         :return: Global mass matrix of shape (12, 12)
         :rtype: numpy.ndarray
         """
 
         # Get the member's local mass matrix
-        m = self.m(mass_combo_name, mass_direction, gravity)
+        m = self.m(mass_combo_name, mass_direction, gravity, mass_formulation)
 
         # Get the member's transformation matrix
         T = self.T()
@@ -780,6 +987,21 @@ class Member3D():
         # Initialize the fixed end reaction vector
         fer = zeros((12, 1))
 
+        # Compute Timoshenko shear deformation parameters for FER
+        E = self.material.E
+        G = self.material.G
+        Iy = self.section.Iy
+        Iz = self.section.Iz
+        L = self.L()
+        Asy = self.section.Asy
+        Asz = self.section.Asz
+        if self._use_timoshenko:
+            Phi_y = 12 * E * Iy / (G * Asz * L**2) if Asz else 0.0
+            Phi_z = 12 * E * Iz / (G * Asy * L**2) if Asy else 0.0
+        else:
+            Phi_y = 0.0
+            Phi_z = 0.0
+
         # Get the requested load combination
         combo = self.model.load_combos[combo_name]
 
@@ -793,35 +1015,35 @@ class Member3D():
                 if ptLoad[3] == case:
 
                     if ptLoad[0] == 'Fx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*ptLoad[1], ptLoad[2], self.L()))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*ptLoad[1], ptLoad[2], L))
                     elif ptLoad[0] == 'Fy':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], self.L(), 'Fy'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], L, 'Fy', Phi_z))
                     elif ptLoad[0] == 'Fz':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], self.L(), 'Fz'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*ptLoad[1], ptLoad[2], L, 'Fz', Phi_y))
                     elif ptLoad[0] == 'Mx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*ptLoad[1], ptLoad[2], self.L()))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*ptLoad[1], ptLoad[2], L))
                     elif ptLoad[0] == 'My':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], self.L(), 'My'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], L, 'My', Phi_y))
                     elif ptLoad[0] == 'Mz':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], self.L(), 'Mz'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*ptLoad[1], ptLoad[2], L, 'Mz', Phi_z))
                     elif ptLoad[0] == 'FX' or ptLoad[0] == 'FY' or ptLoad[0] == 'FZ':
                         FX, FY, FZ = 0, 0, 0
                         if ptLoad[0] == 'FX': FX = 1
                         if ptLoad[0] == 'FY': FY = 1
                         if ptLoad[0] == 'FZ': FZ = 1
                         f = self.T()[:3, :][:, :3] @ array([FX*ptLoad[1], FY*ptLoad[1], FZ*ptLoad[1]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*f[0], ptLoad[2], self.L()))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[1], ptLoad[2], self.L(), 'Fy'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[2], ptLoad[2], self.L(), 'Fz'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialPtLoad(factor*f[0], ptLoad[2], L))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[1], ptLoad[2], L, 'Fy', Phi_z))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_PtLoad(factor*f[2], ptLoad[2], L, 'Fz', Phi_y))
                     elif ptLoad[0] == 'MX' or ptLoad[0] == 'MY' or ptLoad[0] == 'MZ':
                         MX, MY, MZ = 0, 0, 0
                         if ptLoad[0] == 'MX': MX = 1
                         if ptLoad[0] == 'MY': MY = 1
                         if ptLoad[0] == 'MZ': MZ = 1
                         f = self.T()[:3, :][:, :3] @ array([MX*ptLoad[1], MY*ptLoad[1], MZ*ptLoad[1]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*f[0], ptLoad[2], self.L()))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[1], ptLoad[2], self.L(), 'My'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[2], ptLoad[2], self.L(), 'Mz'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Torque(factor*f[0], ptLoad[2], L))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[1], ptLoad[2], L, 'My', Phi_y))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_Moment(factor*f[2], ptLoad[2], L, 'Mz', Phi_z))
                     else:
                         raise Exception('Invalid member point load direction specified.')
 
@@ -832,9 +1054,11 @@ class Member3D():
                 if distLoad[5] == case:
 
                     if distLoad[0] == 'Fx':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], self.L()))
-                    elif distLoad[0] == 'Fy' or distLoad[0] == 'Fz':
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], self.L(), distLoad[0]))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], L))
+                    elif distLoad[0] == 'Fy':
+                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], L, 'Fy', Phi_z))
+                    elif distLoad[0] == 'Fz':
+                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*distLoad[1], factor*distLoad[2], distLoad[3], distLoad[4], L, 'Fz', Phi_y))
                     elif distLoad[0] == 'FX' or distLoad[0] == 'FY' or distLoad[0] == 'FZ':
                         FX, FY, FZ = 0, 0, 0
                         if distLoad[0] == 'FX': FX = 1
@@ -842,9 +1066,9 @@ class Member3D():
                         if distLoad[0] == 'FZ': FZ = 1
                         w1 = self.T()[:3, :][:, :3] @ array([FX*distLoad[1], FY*distLoad[1], FZ*distLoad[1]])
                         w2 = self.T()[:3, :][:, :3] @ array([FX*distLoad[2], FY*distLoad[2], FZ*distLoad[2]])
-                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*w1[0], factor*w2[0], distLoad[3], distLoad[4], self.L()))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[1], factor*w2[1], distLoad[3], distLoad[4], self.L(), 'Fy'))
-                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[2], factor*w2[2], distLoad[3], distLoad[4], self.L(), 'Fz'))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_AxialLinLoad(factor*w1[0], factor*w2[0], distLoad[3], distLoad[4], L))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[1], factor*w2[1], distLoad[3], distLoad[4], L, 'Fy', Phi_z))
+                        fer = add(fer, Pynite.FixedEndReactions.FER_LinLoad(factor*w1[2], factor*w2[2], distLoad[3], distLoad[4], L, 'Fz', Phi_y))
 
         # Return the fixed end reaction vector, uncondensed
         return fer
@@ -2841,12 +3065,27 @@ class Member3D():
         # Get the member's length and stiffness properties
         L = self.L()
         E = self.material.E
+        G = self.material.G
         A = self.section.A
         Iz = self.section.Iz
         Iy = self.section.Iy
         SegmentsZ = self.SegmentsZ
         SegmentsY = self.SegmentsY
         SegmentsX = self.SegmentsX
+
+        # Timoshenko shear deformation parameters
+        Asy = self.section.Asy
+        Asz = self.section.Asz
+        if self._use_timoshenko:
+            Phi_y = 12 * E * Iy / (G * Asz * L**2) if Asz else 0.0
+            Phi_z = 12 * E * Iz / (G * Asy * L**2) if Asy else 0.0
+            kAG_z = G * Asy if Asy else None  # shear rigidity for z-bending (Fy direction)
+            kAG_y = G * Asz if Asz else None  # shear rigidity for y-bending (Fz direction)
+        else:
+            Phi_y = 0.0
+            Phi_z = 0.0
+            kAG_z = None
+            kAG_y = None
 
         # Get the load combination to segment the member for
         combo = self.model.load_combos[combo_name]
@@ -2878,6 +3117,7 @@ class Member3D():
             newSeg.x2 = disconts[index+1]  # Segment end location
             newSeg.EI = E*Iz               # Segment flexural stiffness
             newSeg.EA = E*A                # Segment axial stiffness
+            newSeg.kAG = kAG_z             # Segment shear rigidity (Timoshenko)
             SegmentsZ.append(newSeg)       # Add the segment to the list
 
             # y-direction segments (bending about local y-axis)
@@ -2886,6 +3126,7 @@ class Member3D():
             newSeg.x2 = disconts[index+1]  # Segment end location
             newSeg.EI = E*Iy               # Segment flexural stiffness
             newSeg.EA = E*A                # Segment axial stiffness
+            newSeg.kAG = kAG_y             # Segment shear rigidity (Timoshenko)
             SegmentsY.append(newSeg)       # Add the segment to the list
 
             # x-direction segments (for torsional moment)
@@ -2924,8 +3165,8 @@ class Member3D():
         delta2z = d[8, 0]    # local z displacement at end of member
         SegmentsZ[0].delta1 = delta1y
         SegmentsY[0].delta1 = delta1z
-        SegmentsZ[0].theta1 = 1/3*((m1z - fem1z)*L/(E*Iz) - (m2z - fem2z)*L/(2*E*Iz) + 3*(delta2y - delta1y)/L)
-        SegmentsY[0].theta1 = -1/3*((m1y - fem1y)*L/(E*Iy) - (m2y - fem2y)*L/(2*E*Iy) + 3*(delta2z - delta1z)/L)
+        SegmentsZ[0].theta1 = L/(12*E*Iz)*((4+Phi_z)*(m1z - fem1z) - (2-Phi_z)*(m2z - fem2z)) + (delta2y - delta1y)/L
+        SegmentsY[0].theta1 = -L/(12*E*Iy)*((4+Phi_y)*(m1y - fem1y) - (2-Phi_y)*(m2y - fem2y)) - (delta2z - delta1z)/L
 
         # Add the axial deflection at the start of the member
         SegmentsZ[0].delta_x1 = d[0, 0]
