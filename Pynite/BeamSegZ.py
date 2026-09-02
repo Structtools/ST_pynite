@@ -88,6 +88,7 @@ class BeamSegZ():
         self.delta_x1: float | None = None  # Axial displacement at start of beam segment
         self.EI: float | None = None  # Flexural stiffness of the beam segment
         self.EA: float | None = None  # Axial stiffness of the beam segment
+        self.kAG: float | None = None  # Shear rigidity (G*As) for Timoshenko shear deflection; None = Euler-Bernoulli
 
     def __repr__(self) -> str:
         return f"BeamSegZ(x1={self.x1}, x2={self.x2})"
@@ -189,7 +190,8 @@ class BeamSegZ():
             # Calculate the slope at `x` (without including P-little-delta effects)
             theta_x = theta_1 - (-V1*x**2/2 - w1*x**3/6 + x*M1 + x**4*(w1 - w2)/(24*L))/EI
 
-        # Return the calculated slope
+        # Return the bending slope only (no shear rotation).
+        # Shear deformation is handled separately in `deflection()`.
         return theta_x
 
     # Returns the deflection at a location on the segment
@@ -205,16 +207,21 @@ class BeamSegZ():
         L = self.length()
         EI = self.EI
 
+        # Timoshenko shear deflection: -integral of V(t)/kAG from 0 to x
+        # The negative sign arises because V_PyNite (reaction convention) = -V_constitutive
+        kAG = self.kAG
+        delta_shear = -(V1*x + w1*x**2/2 + (w2 - w1)*x**3/(6*L)) / kAG if kAG else 0.0
+
         # Check if a P-delta solution is requested
         if P_delta == True:
 
             # Return the deflection at `x` including P-little-delta effects
-            return (L*V1*x**3/3 + L*w1*x**4/12 + L*(2*EI*delta_1 + 2*EI*theta_1*x - M1*x**2 + P1*delta_1*x**2) + x**5*(-w1 + w2)/60)/(L*(2*EI + P1*x**2))
-        
+            return (L*V1*x**3/3 + L*w1*x**4/12 + L*(2*EI*delta_1 + 2*EI*theta_1*x - M1*x**2 + P1*delta_1*x**2) + x**5*(-w1 + w2)/60)/(L*(2*EI + P1*x**2)) + delta_shear
+
         else:
 
             # Return the deflection at `x` (without including P-little-delta effects)
-            return delta_1 + theta_1*x + V1*x**3/(6*EI) + w1*x**4/(24*EI) + x**2*(-M1)/(2*EI) + x**5*(-w1 + w2)/(120*EI*L)
+            return delta_1 + theta_1*x + V1*x**3/(6*EI) + w1*x**4/(24*EI) + x**2*(-M1)/(2*EI) + x**5*(-w1 + w2)/(120*EI*L) + delta_shear
 
     def axial_deflection(self, x: float) -> float:
 
