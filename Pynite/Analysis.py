@@ -14,6 +14,7 @@ from numpy import array, atleast_2d, zeros, subtract, matmul, divide, seterr, na
 from numpy.linalg import solve, norm, LinAlgError
 
 from Pynite.LoadCombo import LoadCombo
+from Pynite.ModalResults import fix_mode_shape_signs
 
 if TYPE_CHECKING:
     from typing import List, Tuple
@@ -27,35 +28,89 @@ if TYPE_CHECKING:
 class BucklingResults:
     """Results from a linear buckling (stability) eigenvalue analysis.
 
+    The analysis runs on an internal, possibly subdivided, copy of the user's model. That copy is
+    kept as `analysis_model` so that the first-order member forces behind the geometric stiffness
+    matrix, and the buckling lengths derived from them, can be queried after the analysis.
+
     Attributes
     ----------
     load_multipliers : np.ndarray
-        Load multipliers λ sorted ascending. The smallest positive λ is the
-        critical load factor: P_cr = λ · P_applied.
+        Load multipliers λ (α_cr in EN 1993-1-1 terminology) sorted ascending. The smallest is the
+        critical load factor: the loads of `combo_name` multiplied by λ reach the elastic critical
+        load.
     mode_shapes : np.ndarray
-        Buckling mode shape vectors (columns) in the free-DOF basis.
+        Buckling mode shapes, one column per mode, in the free-DOF basis of the eigenproblem. Each
+        mode is scaled so that its largest component has magnitude 1. `free_dof_indices` and
+        `dof_map` say which DOF each row belongs to. The mode shapes are also stored on the model
+        as the displacements of the load combinations `Buckling Mode 1`, `Buckling Mode 2`, ...
+        (tagged `'buckling'`) so that they can be rendered like any other combination.
     combo_name : str
-        Name of the load combination used for the static pre-solve.
+        Name of the load combination used for the first-order static pre-solve.
+    free_dof_indices : np.ndarray
+        Global DOF index (node ID*6 + dof) of each row of `mode_shapes`, on `analysis_model`.
+    dof_map : list[tuple[str, str]]
+        `(node name, dof)` for each row of `mode_shapes`, e.g. `('N3', 'DZ')`.
+    plane : str | None
+        The analysis plane that was declared (`'XY'`, `'XZ'`, `'YZ'`), or `None` for a full 3D
+        analysis.
+    out_of_plane : bool
+        Whether the eigenproblem was restricted to the out-of-plane degrees of freedom of `plane`.
+    include_moments : bool
+        Whether the bending moment, shear and torque terms of the geometric stiffness matrix were
+        included (lateral-torsional buckling).
+    warping : str
+        How warping stiffness was treated: `'ignore'` or `'equivalent_torsion'`.
+    elements_per_member : int
+        The number of elements each physical member was subdivided into for the analysis.
+    solver : str
+        Which eigensolver was used: `'dense'` or `'sparse'`.
+    requested_modes : int
+        The number of modes that were asked for. Fewer may have been found.
+    analysis_model : FEModel3D
+        The copy of the model the analysis was actually run on.
     """
 
     load_multipliers: np.ndarray
     mode_shapes: np.ndarray
     combo_name: str
-    _model: object   # FEModel3D reference — used by effective_length()
-    _D1_indices: list
-    _D2_indices: list
+    free_dof_indices: np.ndarray
+    dof_map: list
+    analysis_model: object
+    plane: str | None = None
+    out_of_plane: bool = False
+    include_moments: bool = True
+    warping: str = 'ignore'
+    elements_per_member: int = 1
+    solver: str = 'dense'
+    requested_modes: int = 0
+
+    # Degrees of freedom that carry out-of-plane motion for each analysis plane
+    _OUT_OF_PLANE_DOFS = {'XY': (2, 3, 4), 'XZ': (1, 3, 5), 'YZ': (0, 4, 5)}
 
     @property
     def critical_load_factors(self) -> np.ndarray:
-        """Alias for load_multipliers (EN 1993 terminology)."""
+        """Alias for `load_multipliers` (EN 1993-1-1 terminology: α_cr)."""
         return self.load_multipliers
 
-    def effective_length(self, member, mode: int = 0, plane: str = 'y') -> float:
-        """Compute the effective buckling length L_cr for a member.
+    @property
+    def mode_count(self) -> int:
+        """The number of buckling modes that were found."""
+        return int(self.load_multipliers.size)
 
-        Uses the Euler formula: L_cr = π · sqrt(EI / N_cr)
-        where N_cr = λ · |N_Ed| and N_Ed is the member axial force from the
-        static pre-solve.
+    @property
+    def truncated(self) -> bool:
+        """Whether fewer modes were found than were requested."""
+        return self.mode_count < self.requested_modes
+
+    def effective_length(self, member, mode: int = 0, plane: str = 'y') -> float:
+        """Compute the effective (flexural) buckling length L_cr of a member from a buckling mode.
+
+        Uses the Euler formula `L_cr = π · sqrt(EI / N_cr)` with `N_cr = λ · |N_Ed|`, where `N_Ed` is
+        the member's axial force from the first-order pre-solve. This is the usual way of turning a
+        frame's critical load factor into a buckling length for an EN 1993-1-1 clause 6.3.1 check.
+        It is only meaningful for a member that is in compression and that actually takes part in
+        the mode; for a member that stays straight in the mode the value is an upper bound of no
+        practical use, and for a lateral-torsional mode the Euler formula does not apply at all.
 
         Parameters
         ----------
@@ -64,8 +119,8 @@ class BucklingResults:
         mode : int
             Buckling mode index (0 = lowest/critical). Default 0.
         plane : str
-            ``'y'`` for bending about local y-axis (uses Iy),
-            ``'z'`` for bending about local z-axis (uses Iz). Default ``'y'``.
+            ``'y'`` for bending about the local y-axis (uses Iy),
+            ``'z'`` for bending about the local z-axis (uses Iz). Default ``'y'``.
 
         Returns
         -------
@@ -74,7 +129,7 @@ class BucklingResults:
             Returns ``inf`` if the member has no axial force.
         """
         if isinstance(member, str):
-            member = self._model.members[member]
+            member = self.analysis_model.members[member]
 
         lam = self.load_multipliers[mode]
 
@@ -92,10 +147,68 @@ class BucklingResults:
 
         return np.pi * np.sqrt(E * I / N_cr)
 
+    def out_of_plane_share(self, plane: str | None = None) -> np.ndarray:
+        """Returns, for each mode, the share of the mode shape carried by out-of-plane DOFs.
 
-def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
-                      num_modes: int = 5) -> BucklingResults:
-    """Perform linear buckling (stability) eigenvalue analysis.
+        For a planar frame loaded in its plane the in-plane and out-of-plane degrees of freedom are
+        uncoupled in both the elastic and the geometric stiffness matrices, so every mode is either
+        purely in-plane (share 0) or purely out-of-plane (share 1). Intermediate values indicate a
+        model that is not actually planar, or a mode whose in-plane and out-of-plane parts happen to
+        share an eigenvalue.
+
+        :param plane: The plane of the frame: `'XY'`, `'XZ'` or `'YZ'`. Defaults to the plane the
+                      analysis was run with.
+        :type plane: str, optional
+        :return: The out-of-plane share of each mode, between 0 and 1
+        :rtype: np.ndarray
+        """
+
+        plane = plane if plane is not None else self.plane
+        if plane not in self._OUT_OF_PLANE_DOFS:
+            raise ValueError(f"`plane` must be 'XY', 'XZ' or 'YZ'. '{plane}' was given.")
+
+        oop = np.isin(np.asarray(self.free_dof_indices) % 6, self._OUT_OF_PLANE_DOFS[plane])
+        total = np.sum(self.mode_shapes**2, axis=0)
+
+        with np.errstate(invalid='ignore', divide='ignore'):
+            share = np.sum(self.mode_shapes[oop, :]**2, axis=0)/total
+
+        return np.nan_to_num(share)
+
+    def classify_modes(self, plane: str | None = None, tol: float = 0.05) -> list:
+        """Labels each mode `'in-plane'`, `'out-of-plane'` or `'coupled'`.
+
+        :param plane: The plane of the frame: `'XY'`, `'XZ'` or `'YZ'`. Defaults to the plane the
+                      analysis was run with.
+        :type plane: str, optional
+        :param tol: The out-of-plane share below which a mode counts as in-plane, and above
+                    `1 - tol` as out-of-plane. Defaults to 0.05.
+        :type tol: float, optional
+        :return: One label per mode
+        :rtype: list[str]
+        """
+
+        labels = []
+        for share in self.out_of_plane_share(plane):
+            if share <= tol:
+                labels.append('in-plane')
+            elif share >= 1 - tol:
+                labels.append('out-of-plane')
+            else:
+                labels.append('coupled')
+
+        return labels
+
+
+def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1', num_modes: int = 5,
+                      include_moments: bool = True, eigen_restrained_dofs=(),
+                      log: bool = False) -> BucklingResults:
+    """Perform linear buckling (stability) eigenvalue analysis on a prepared model.
+
+    This is the solver behind :meth:`FEModel3D.analyze_buckling`, which is the method to call.
+    `analyze_buckling` makes the subdivided analysis copy, applies the analysis plane and the
+    warping option, and copies the results back; this function does the mechanics on the model it
+    is given, and modifies that model (displacements, load combinations, numbering).
 
     Solves the generalised eigenvalue problem::
 
@@ -104,9 +217,10 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     where
 
     * K   = global elastic stiffness matrix (free DOFs only)
-    * Kg  = global geometric stiffness matrix assembled using the member axial
-            forces from a first-order static solve under *combo_name*
-    * λ   = eigenvalues → load multipliers to the critical buckling load
+    * Kg  = global geometric stiffness matrix assembled from the member forces of a first-order
+            static solve under *combo_name*: axial forces and, when `include_moments` is `True`,
+            bending moments, shear forces and torques
+    * λ   = eigenvalues → load multipliers to the critical buckling load (α_cr)
     * φ   = eigenvectors → buckling mode shapes
 
     The smallest positive λ gives the critical load factor:
@@ -116,27 +230,34 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     -----
     1. Prepare the model (reset displacements, renumber nodes/elements).
     2. Partition DOFs into free (D1) and restrained (D2).
-    3. Run a first-order static solve for *combo_name* to populate member
-       axial forces (required for Kg assembly).
-    4. Assemble K and Kg; partition both to free DOFs.
-    5. Reformulate ``K φ = λ (−Kg) φ`` as ``(−Kg) φ = μ K φ`` (where
-       ``μ = 1/λ``), then call ``eigsh(−Kg11, M=K11, which='LA', k=k)``
-       to find the *largest algebraic* μ values.  K11 is the symmetric
-       positive-definite M-matrix; −Kg11 is the (possibly indefinite)
-       A-matrix.  No sigma-shift or regularisation is needed.
-    6. Keep only positive μ (positive μ ↔ positive λ, i.e. buckling under
-       load amplification; negative μ would require load reversal).
-       Convert ``λ = 1/μ`` and sort ascending so the smallest load
-       multiplier comes first.
+    3. Run a first-order static solve for *combo_name* to populate the member forces.
+    4. Assemble K and Kg; partition both to the free DOFs of the eigenproblem, which are the free
+       DOFs of the model less any in `eigen_restrained_dofs`.
+    5. Solve ``(−Kg) φ = μ K φ`` for the largest algebraic ``μ = 1/λ``. K is symmetric positive
+       definite, −Kg symmetric and in general indefinite. Small problems are solved densely, large
+       ones with ARPACK (`eigsh`).
+    6. Keep only positive μ (positive μ ↔ positive λ, i.e. buckling under load amplification;
+       negative μ would require load reversal), convert ``λ = 1/μ`` and sort ascending.
+    7. Scale each mode shape to a largest component of 1, give it a deterministic sign, and store
+       it on the model as the displacements of the load combination ``Buckling Mode n``.
 
     Parameters
     ----------
     model : FEModel3D
+        The model to analyse. It is modified.
     combo_name : str
-        Load combination to use for the static pre-solve. Defaults to
-        ``'Combo 1'``.
+        Load combination to use for the static pre-solve. Defaults to ``'Combo 1'``.
     num_modes : int
         Number of buckling modes to compute. Defaults to 5.
+    include_moments : bool
+        Include the bending moment, shear and torque terms of the geometric stiffness matrix
+        (lateral-torsional buckling). Defaults to ``True``.
+    eigen_restrained_dofs : iterable of int
+        DOF offsets (0 = DX, 1 = DY, 2 = DZ, 3 = RX, 4 = RY, 5 = RZ) to restrain in the
+        eigenproblem only. The static pre-solve uses the model's own supports. Used to isolate
+        out-of-plane buckling by restraining the in-plane DOFs. Defaults to none.
+    log : bool
+        Print progress to the console. Defaults to ``False``.
 
     Returns
     -------
@@ -145,36 +266,26 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     Raises
     ------
     ValueError
-        If all DOFs are restrained, or if Kg is identically zero (no axial
-        loads).
+        If all DOFs are restrained, if the static pre-solve is singular, or if Kg is identically
+        zero (no member forces).
     RuntimeError
-        If the static pre-solve or the eigenvalue solve fails.
+        If the eigenvalue solve fails.
     """
-    # ------------------------------------------------------------------ #
-    # Step 0: Force Timoshenko for all members during stability analysis   #
-    # ------------------------------------------------------------------ #
-    _set_force_timoshenko(model, True)
-
-    try:
-        return _buckling_analysis_inner(model, combo_name, num_modes)
-    finally:
-        _set_force_timoshenko(model, False)
-
-
-def _set_force_timoshenko(model: FEModel3D, value: bool) -> None:
-    """Set _force_timoshenko on all sub-members (and physical members) in the model."""
-    for phys_member in model.members.values():
-        phys_member._force_timoshenko = value
-        for sub_member in phys_member.sub_members.values():
-            sub_member._force_timoshenko = value
-
-
-def _buckling_analysis_inner(model, combo_name, num_modes):
 
     # ------------------------------------------------------------------ #
     # Step 1: Prepare model                                                #
     # ------------------------------------------------------------------ #
+    # Remove any buckling load combinations from a prior analysis first, so that a model holding
+    # nothing but those still gets its default load combination from `_prepare_model`
+    to_remove = [name for name, combo in model.load_combos.items()
+                 if combo.combo_tags is not None and 'buckling' in combo.combo_tags]
+    for name in to_remove:
+        model.load_combos.pop(name)
+
     _prepare_model(model)
+
+    if combo_name not in model.load_combos:
+        raise ValueError(f"Load combination '{combo_name}' does not exist in the model.")
 
     # ------------------------------------------------------------------ #
     # Step 2: DOF partitioning                                             #
@@ -184,8 +295,11 @@ def _buckling_analysis_inner(model, combo_name, num_modes):
     # ------------------------------------------------------------------ #
     # Step 3: First-order static solve for combo_name                     #
     #         Populates node displacements so that Kg(first_step=False)   #
-    #         can back-calculate member axial forces via axial strain.     #
+    #         can back-calculate the member end forces.                   #
     # ------------------------------------------------------------------ #
+    if log:
+        print('- Assembling the elastic stiffness matrix')
+
     K_global = model.Ke(combo_name, sparse=True).tocsr()
     K11, K12, K21, K22 = _partition(model, K_global, D1_indices, D2_indices)
 
@@ -198,68 +312,73 @@ def _buckling_analysis_inner(model, combo_name, num_modes):
     FER1, FER2 = _partition(model, model.FER(combo_name), D1_indices, D2_indices)
     P1,   P2   = _partition(model, model.P(combo_name),   D1_indices, D2_indices)
 
+    if log:
+        print(f"- Solving the first-order static problem for '{combo_name}'")
+
     try:
-        D1 = spsolve(K11, P1 - FER1 - K12 @ D2).reshape(-1, 1)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', sp.sparse.linalg.MatrixRankWarning)
+            D1 = spsolve(K11, P1 - FER1 - K12 @ D2).reshape(-1, 1)
     except Exception as exc:
-        raise RuntimeError(f'Static pre-solve failed: {exc}') from exc
+        raise ValueError(
+            f'Static pre-solve failed: {exc}. The model is unstable (a mechanism or rigid body '
+            'motion). For a planar frame without out-of-plane supports, declare the analysis '
+            "plane (e.g. plane='XY') so that the out-of-plane DOFs are restrained."
+        ) from exc
+
+    if not np.all(np.isfinite(D1)):
+        raise ValueError(
+            'Static pre-solve produced non-finite displacements. The model is unstable (a '
+            'mechanism or rigid body motion).'
+        )
 
     combo = model.load_combos[combo_name]
     _store_displacements(model, D1, D2, D1_indices, D2_indices, combo)
 
     # ------------------------------------------------------------------ #
-    # Step 4: Geometric stiffness using axial forces from the static solve #
+    # Step 4: Geometric stiffness using the member forces from the solve  #
     # ------------------------------------------------------------------ #
-    Kg_global = model.Kg(combo_name, first_step=False, sparse=True).tocsr()
-    Kg11, Kg12, Kg21, Kg22 = _partition(model, Kg_global, D1_indices, D2_indices)
+    if log:
+        print('- Assembling the geometric stiffness matrix'
+              + (' (with bending moment terms)' if include_moments else ''))
+
+    Kg_global = model.Kg(combo_name, first_step=False, sparse=True,
+                         include_moments=include_moments).tocsr()
+
+    # The eigenproblem may be restricted to a subset of the free DOFs (e.g. the out-of-plane DOFs)
+    restrained = set(eigen_restrained_dofs)
+    eig_indices = [i for i in D1_indices if i % 6 not in restrained]
+
+    if len(eig_indices) == 0:
+        raise ValueError(
+            'Every free DOF has been excluded from the eigenproblem. Check the analysis plane and '
+            'the `out_of_plane` setting against the model.'
+        )
+
+    K11 = K_global[eig_indices, :][:, eig_indices]
+    Kg11 = Kg_global[eig_indices, :][:, eig_indices]
 
     # ------------------------------------------------------------------ #
     # Step 5: Eigenvalue solve                                             #
     #                                                                      #
     # Reformulate  K φ = λ (−Kg) φ  as  (−Kg) φ = μ K φ  where μ = 1/λ. #
-    #                                                                      #
-    # Now K is the M-matrix (symmetric positive definite — always valid    #
-    # for eigsh) and −Kg is the A-matrix (symmetric, may be indefinite).   #
-    # eigsh with which='LA' finds the largest μ → smallest positive λ.     #
-    # No epsilon regularisation is needed.                                 #
+    # K is the M-matrix (symmetric positive definite) and −Kg is the      #
+    # A-matrix (symmetric, may be indefinite). The largest algebraic μ    #
+    # is the smallest positive λ.                                          #
     # ------------------------------------------------------------------ #
     neg_Kg11 = (-Kg11).tocsr()
 
-    if neg_Kg11.nnz == 0:
+    if neg_Kg11.nnz == 0 or np.max(np.abs(neg_Kg11.data)) == 0.0:
         raise ValueError(
-            'The geometric stiffness matrix is zero — no member has a '
-            'non-zero axial force under combo_name. '
-            'Ensure compressive loads are applied before calling '
-            'buckling_analysis().'
+            'The geometric stiffness matrix is zero — no member carries an axial force or bending '
+            f"moment under '{combo_name}' on the degrees of freedom of the eigenproblem. Ensure "
+            'loads are applied before calling the buckling analysis.'
         )
 
-    n = K11.shape[0]
-    # Request extra modes to improve convergence; trim to num_modes later
-    k = min(max(num_modes, 2 * num_modes), n - 1)
+    if log:
+        print('- Solving the eigenvalue problem')
 
-    try:
-        # Use a deterministic starting vector to ensure reproducible results
-        rng = np.random.RandomState(42)
-        v0 = rng.rand(n)
-        # Solve (-Kg) φ = μ K φ  for the largest algebraic μ.
-        # M = K11 is SPD, so eigsh is valid even though A = -Kg11 is indefinite.
-        eigenvalues_mu, eigenvectors = eigsh(
-            neg_Kg11, k=k, M=K11, which='LA', v0=v0,
-            maxiter=k * 40,
-        )
-    except ArpackNoConvergence as exc:
-        # Use the converged eigenvalues/vectors even if not all converged
-        eigenvalues_mu = exc.eigenvalues
-        eigenvectors = exc.eigenvectors
-        if len(eigenvalues_mu) == 0:
-            raise RuntimeError(
-                'Eigenvalue solve failed: no eigenvalues converged. '
-                'Check that the structure has members under compression.'
-            ) from exc
-    except Exception as exc:
-        raise RuntimeError(
-            f'Eigenvalue solve failed: {exc}. '
-            'Check that the structure has members under compression.'
-        ) from exc
+    eigenvalues_mu, eigenvectors, solver = _solve_buckling_eigenproblem(neg_Kg11, K11, num_modes)
 
     # ------------------------------------------------------------------ #
     # Step 6: Convert μ → λ, filter positive, sort ascending              #
@@ -267,32 +386,130 @@ def _buckling_analysis_inner(model, combo_name, num_modes):
     # Keep only safely positive μ values. Very small positive values can
     # occur for nullspace/near-nullspace modes and are not safe to invert.
     mu_scale = np.max(np.abs(eigenvalues_mu)) if len(eigenvalues_mu) else 0.0
-    mu_tol = max(1e-12, np.finfo(float).eps * max(1.0, mu_scale))
-    pos_mask      = eigenvalues_mu > mu_tol
+    mu_tol = max(1e-12, np.finfo(float).eps*max(1.0, mu_scale))
+    pos_mask = eigenvalues_mu > mu_tol
     eigenvalues_mu = eigenvalues_mu[pos_mask]
-    eigenvectors   = eigenvectors[:, pos_mask]
+    eigenvectors = eigenvectors[:, pos_mask]
 
     # Convert μ = 1/λ  →  λ = 1/μ, then discard any non-finite results as
     # a final safeguard against numerical issues.
-    eigenvalues = 1.0 / eigenvalues_mu
+    eigenvalues = 1.0/eigenvalues_mu
     finite_mask = np.isfinite(eigenvalues)
     eigenvalues = eigenvalues[finite_mask]
     eigenvectors = eigenvectors[:, finite_mask]
 
-    order        = np.argsort(eigenvalues)
-    eigenvalues  = eigenvalues[order][:num_modes]
+    order = np.argsort(eigenvalues)
+    eigenvalues = eigenvalues[order][:num_modes]
     eigenvectors = eigenvectors[:, order][:, :num_modes]
 
+    # ------------------------------------------------------------------ #
+    # Step 7: Normalise the mode shapes and store them on the model       #
+    # ------------------------------------------------------------------ #
+    # Scale each mode to a largest component of 1 (an eigenvector's scale is arbitrary), then give
+    # it a deterministic sign so that repeated runs and renumbered models agree
+    peaks = np.max(np.abs(eigenvectors), axis=0)
+    peaks[peaks == 0.0] = 1.0
+    eigenvectors = eigenvectors/peaks
+    fix_mode_shape_signs(eigenvectors, model._dof_coordinates(eig_indices))
+
+    # Position of each eigenproblem DOF within the model's free DOFs
+    position = {dof: k for k, dof in enumerate(D1_indices)}
+    rows = [position[dof] for dof in eig_indices]
+
+    for i in range(eigenvalues.size):
+
+        mode_combo_name = f'Buckling Mode {i + 1}'
+        model.add_load_combo(mode_combo_name, {}, ['buckling'])
+
+        # Expand the mode shape onto all free DOFs (zero on the DOFs excluded from the eigenproblem)
+        D1_mode = zeros((len(D1_indices), 1))
+        D1_mode[rows, 0] = eigenvectors[:, i]
+
+        # Supports and enforced displacements take no part in a mode shape
+        _store_displacements(model, D1_mode, zeros(D2.shape), D1_indices, D2_indices,
+                             model.load_combos[mode_combo_name])
+
     model.solution = 'Buckling'
+
+    if log:
+        print(f'- Found {eigenvalues.size} of {num_modes} requested modes')
 
     return BucklingResults(
         load_multipliers=eigenvalues,
         mode_shapes=eigenvectors,
         combo_name=combo_name,
-        _model=model,
-        _D1_indices=D1_indices,
-        _D2_indices=D2_indices,
+        free_dof_indices=np.asarray(eig_indices),
+        dof_map=model._dof_map(eig_indices),
+        analysis_model=model,
+        include_moments=include_moments,
+        solver=solver,
+        requested_modes=num_modes,
     )
+
+
+def _solve_buckling_eigenproblem(neg_Kg11, K11, num_modes: int, dense_limit: int = 1500):
+    """Solves `(−Kg) φ = μ K φ` for the largest algebraic μ.
+
+    Small problems are solved densely with LAPACK, which returns every eigenpair and cannot fail to
+    converge. Larger problems use ARPACK's `eigsh` with `K` as the (positive definite) M-matrix,
+    requesting extra modes to help convergence.
+
+    :param neg_Kg11: The negated geometric stiffness matrix on the eigenproblem DOFs (sparse).
+    :param K11: The elastic stiffness matrix on the eigenproblem DOFs (sparse).
+    :param num_modes: The number of buckling modes wanted.
+    :param dense_limit: Problems with at most this many DOFs are solved densely. Defaults to 1500.
+    :return: The eigenvalues μ, the eigenvectors (one per column) and the solver name
+    :rtype: tuple[np.ndarray, np.ndarray, str]
+    """
+
+    n = K11.shape[0]
+
+    if n <= dense_limit:
+
+        try:
+            eigenvalues_mu, eigenvectors = sp.linalg.eigh(neg_Kg11.toarray(), K11.toarray())
+        except Exception as exc:
+            raise RuntimeError(
+                f'Eigenvalue solve failed: {exc}. The elastic stiffness matrix may not be positive '
+                'definite (the model may be unstable).'
+            ) from exc
+
+        return eigenvalues_mu, eigenvectors, 'dense'
+
+    # Request extra modes to improve convergence; trim to num_modes later
+    k = min(2*num_modes, n - 1)
+
+    try:
+        # Use a deterministic starting vector to ensure reproducible results
+        rng = np.random.RandomState(42)
+        v0 = rng.rand(n)
+        # M = K11 is SPD, so eigsh is valid even though A = -Kg11 is indefinite.
+        eigenvalues_mu, eigenvectors = eigsh(neg_Kg11, k=k, M=K11, which='LA', v0=v0,
+                                             maxiter=k*40)
+    except ArpackNoConvergence as exc:
+        # Use the converged eigenvalues/vectors even if not all converged
+        eigenvalues_mu = exc.eigenvalues
+        eigenvectors = exc.eigenvectors
+        if len(eigenvalues_mu) == 0:
+            raise RuntimeError(
+                'Eigenvalue solve failed: no eigenvalues converged. '
+                'Check that the structure has members under compression or bending.'
+            ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f'Eigenvalue solve failed: {exc}. '
+            'Check that the structure has members under compression or bending.'
+        ) from exc
+
+    return eigenvalues_mu, eigenvectors, 'sparse'
+
+
+def _set_force_timoshenko(model: FEModel3D, value: bool) -> None:
+    """Set _force_timoshenko on all sub-members (and physical members) in the model."""
+    for phys_member in model.members.values():
+        phys_member._force_timoshenko = value
+        for sub_member in phys_member.sub_members.values():
+            sub_member._force_timoshenko = value
 
 
 def _prepare_model(model: FEModel3D, n_modes: int = 0) -> None:
@@ -319,8 +536,9 @@ def _prepare_model(model: FEModel3D, n_modes: int = 0) -> None:
         # Create and add a default load combination to the dictionary of load combinations
         model.load_combos['Combo 1'] = LoadCombo('Combo 1', factors={'Case 1':1.0})
 
-    # Remove any modal load combinations from prior modal analyses
-    to_remove = [name for name, combo in model.load_combos.items() if combo.combo_tags != None and 'modal' in combo.combo_tags]
+    # Remove any modal or buckling load combinations from prior eigenvalue analyses
+    to_remove = [name for name, combo in model.load_combos.items()
+                 if combo.combo_tags != None and ('modal' in combo.combo_tags or 'buckling' in combo.combo_tags)]
     for name in to_remove:
         model.load_combos.pop(name)
 

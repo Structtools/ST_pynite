@@ -59,6 +59,7 @@ class FEModel3D():
         self._pushover_traces: Dict[str, Dict[str, List]] = {}
 
         self.solution: str | None = None  # Indicates the solution type for the latest run of the model
+        self._buckling_results = None  # Results of the latest buckling analysis (see `analyze_buckling`)
 
     def __repr__(self) -> str:
         return f"FEModel3D(solution={self.solution!r})"
@@ -320,7 +321,7 @@ class FEModel3D():
         # Return the materal name
         return name
 
-    def add_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Asy: float = 0.0, Asz: float = 0.0) -> str:
+    def add_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Asy: float = 0.0, Asz: float = 0.0, Iw: float | None = None) -> str:
         """Adds a cross-section to the model.
 
         :param name: A unique name for the cross-section.
@@ -337,6 +338,10 @@ class FEModel3D():
         :type Asy: float
         :param Asz: Shear area for shear in the local z-direction (bending about y).
         :type Asz: float
+        :param Iw: Warping constant of the section. Optional. Used by `analyze_buckling` when
+                   `warping='equivalent_torsion'` is requested, and by
+                   `EurocodeHelpers.get_critical_moment`.
+        :type Iw: float, optional
         """
 
         # Name the section or check it doesn't already exist
@@ -352,12 +357,12 @@ class FEModel3D():
                 count += 1
 
         # Add the new section to the model
-        self.sections[name] = Section(self, name, A, Iy, Iz, J, Asy, Asz)
+        self.sections[name] = Section(self, name, A, Iy, Iz, J, Asy, Asz, Iw)
 
         # Return the section name
         return name
 
-    def add_steel_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Zy: float, Zz: float, material_name: str, Asy: float = 0.0, Asz: float = 0.0) -> str:
+    def add_steel_section(self, name: str, A: float, Iy: float, Iz: float, J: float, Zy: float, Zz: float, material_name: str, Asy: float = 0.0, Asz: float = 0.0, Iw: float | None = None) -> str:
         """Adds a cross-section to the model.
 
         :param name: A unique name for the cross-section.
@@ -395,7 +400,7 @@ class FEModel3D():
                 count += 1
 
         # Add the new section to the model
-        self.sections[name] = SteelSection(self, name, A, Iy, Iz, J, Zy, Zz, material_name, Asy, Asz)
+        self.sections[name] = SteelSection(self, name, A, Iy, Iz, J, Zy, Zz, material_name, Asy, Asz, Iw)
 
         # Return the section name
         return name
@@ -1875,7 +1880,7 @@ class FEModel3D():
         # Return the global elastic stiffness matrix
         return Ke
 
-    def Kg(self, combo_name='Combo 1', log=False, sparse=True, first_step=True):
+    def Kg(self, combo_name='Combo 1', log=False, sparse=True, first_step=True, include_moments=False):
         """Returns the model's global geometric stiffness matrix. Geometric stiffness of plates is not considered.
 
         :param combo_name: The name of the load combination to derive the matrix for. Defaults to 'Combo 1'.
@@ -1886,6 +1891,14 @@ class FEModel3D():
         :type sparse: bool, optional
         :param first_step: Used to indicate if the analysis is occuring at the first load step. Used in nonlinear analysis where the load is broken into multiple steps. Default is `True`.
         :type first_step: bool, optional
+        :param include_moments: Include the bending moment, shear force and torque terms of the
+                                member geometric stiffness matrices (see `Member3D.kg`). These are
+                                the terms that produce lateral-torsional and flexural-torsional
+                                buckling. The member end forces are taken from the linear elastic
+                                solution stored for `combo_name`, and the axial force is the average
+                                of the two end values. Defaults to `False`, which gives the
+                                axial-force-only matrix used by the P-Delta analysis.
+        :type include_moments: bool, optional
         :return: The global geometric stiffness matrix for the structure.
         :rtype: ndarray or coo_matrix
         """
@@ -1912,22 +1925,30 @@ class FEModel3D():
                     A = member.section.A
                     L = member.L()
 
-                    # Calculate the axial force acting on the member
+                    # Calculate the axial force (tension positive) and, if requested, the end moments acting on the member
+                    moments = {}
                     if first_step:
                         # For the first load step take P = 0
                         P = 0
+                    elif self.solution == 'Pushover':
+                        # Use the axial force at the current nonlinear/inelastic load step
+                        P = member.f_nonlin[combo_name][6] - member.f_nonlin[combo_name][0]
+                    elif include_moments:
+                        # Member end actions from the linear elastic solution: f = ke*d + fer. These are
+                        # evaluated directly rather than through `member.f()` so that the result does not
+                        # depend on which type of solution the model happens to hold.
+                        f = (member.ke() @ member.d(combo_name) + member.fer(combo_name)).ravel()
+                        # Average axial force along the member (exact for a member without axial member loads)
+                        P = 0.5*(f[6] - f[0])
+                        moments = {'Myi': f[4], 'Mzi': f[5], 'Myj': f[10], 'Mzj': f[11], 'Mxj': f[9]}
                     else:
-                        if self.solution == 'Pushover':
-                            # Use the axial force at the current nonlinear/inelastic load step
-                            P = member.f_nonlin[combo_name][6] - member.f_nonlin[combo_name][0]
-                        else:
-                            # Calculate the member axial force due to linear/elastic axial strain
-                            d = member.d(combo_name)
-                            P = E*A/L*(d[6, 0] - d[0, 0])
+                        # Calculate the member axial force due to linear/elastic axial strain
+                        d = member.d(combo_name)
+                        P = E*A/L*(d[6, 0] - d[0, 0])
 
                     # Get the member's global stiffness matrix
                     # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                    member_Kg = member.Kg(P)
+                    member_Kg = member.Kg(P, elastic_condensation=include_moments, **moments)
 
                     # Step through each term in the member's stiffness matrix
                     # 'a' & 'b' below are row/column indices in the member's stiffness matrix
@@ -2732,8 +2753,9 @@ class FEModel3D():
                 'been solved past yield.'
             )
 
-    def _modal_mesh_copy(self, elements_per_member: int, plane: str | None = None) -> FEModel3D:
-        """Returns a copy of this model with every physical member subdivided for modal analysis.
+    def _modal_mesh_copy(self, elements_per_member: int, plane: str | None = None,
+                         node_prefix: str = '_modal') -> FEModel3D:
+        """Returns a copy of this model with every physical member subdivided for an eigenvalue analysis.
 
         A physical member is one element between its end nodes, and one element per span gets the
         higher modes badly wrong: for a uniform simply supported beam, two elements put mode 3 out
@@ -2750,11 +2772,19 @@ class FEModel3D():
         :type elements_per_member: int
         :param plane: The plane to restrict the analysis to, or `None` for a full 3D analysis.
         :type plane: str, optional
+        :param node_prefix: The prefix for the names of the interior nodes. Defaults to `'_modal'`.
+        :type node_prefix: str, optional
         :return: A subdivided copy of this model
         :rtype: FEModel3D
         """
 
-        model = deepcopy(self)
+        # The results of a previous buckling analysis hold their own analysis copy of the model.
+        # Detach them while copying so that copies do not nest, then put them back.
+        buckling_results, self._buckling_results = self._buckling_results, None
+        try:
+            model = deepcopy(self)
+        finally:
+            self._buckling_results = buckling_results
 
         # Track where nodes already are, so that subdividing two members that share geometry does
         # not stack two nodes on the same point. A duplicated node produces a zero-length
@@ -2785,7 +2815,7 @@ class FEModel3D():
                     continue
 
                 occupied.add(key)
-                model.add_node(f'_modal_{member.name}_{element}', X, Y, Z)
+                model.add_node(f'{node_prefix}_{member.name}_{element}', X, Y, Z)
 
         # Restrain the out-of-plane DOFs at every node once the interior nodes exist, so that a
         # planar model stays planar through the subdivision
@@ -3289,45 +3319,273 @@ class FEModel3D():
         return {name: float(Mr[node.ID*6 + 1]) for name, node in self.nodes.items()}
 
     def analyze_buckling(self, combo_name: str = 'Combo 1', num_modes: int = 5,
-                         log: bool = False):
+                         log: bool = False, plane: str | None = None, out_of_plane: bool = False,
+                         elements_per_member: int = 8, include_moments: bool = True,
+                         warping: str = 'ignore'):
         """Performs linear buckling (stability) eigenvalue analysis.
 
-        Solves [K − λ·Kg]·φ = 0 using the axial forces from a first-order
-        static solve under *combo_name*.  The smallest positive eigenvalue λ
-        is the critical load factor: ``P_cr = λ · P_applied``.
+        Solves `[K − λ·Kg]·φ = 0`, where `Kg` is assembled from the member forces of a first-order
+        static solve under `combo_name`. The smallest positive eigenvalue λ is the critical load
+        factor (α_cr in EN 1993-1-1): the loads of `combo_name` multiplied by λ reach the elastic
+        critical load. The geometric stiffness includes the axial force terms (flexural and
+        torsional buckling) and, by default, the bending moment terms (lateral-torsional buckling
+        of beams, flexural-torsional buckling of beam-columns), so a 3D analysis of a frame loaded
+        in its plane finds both its in-plane sway/member modes and its out-of-plane lateral and
+        lateral-torsional modes.
 
-        Effective buckling lengths can be obtained from the returned
-        :class:`BucklingResults` object::
+        The analysis runs on an internal copy of the model, in which every physical member is
+        subdivided into `elements_per_member` elements. Two things are written back to the
+        caller's model: the buckling mode shapes, as the displacements of the load combinations
+        `Buckling Mode 1`, `Buckling Mode 2`, ... (tagged `'buckling'`) for rendering, and the
+        first-order displacements of `combo_name`, replacing any results the model held for that
+        combination, so that the member forces behind the geometric stiffness can be queried.
+        Results for other combinations are left alone. The results object is also kept in
+        `_buckling_results`.
 
-            results = model.analyze_buckling()
-            L_cr = results.effective_length('Column1', mode=0, plane='y')
+        Planar frames
+        -------------
+        A frame modelled in a plane can be analysed three ways:
 
-        :param combo_name: Load combination used for the static pre-solve.
-            Defaults to ``'Combo 1'``.
+        * `plane=None` (default): full 3D analysis with the supports as modelled. The model must be
+          stable out of plane. `results.classify_modes('XY')` tells which modes are in-plane and
+          which are out-of-plane.
+        * `plane='XY'`: in-plane buckling only. The out-of-plane DOFs (DZ, RX, RY) are restrained
+          at every node, including the interior nodes created by the subdivision, for both the
+          static pre-solve and the eigenproblem. This gives α_cr for in-plane flexural buckling
+          (EN 1993-1-1 5.2.1).
+        * `plane='XY', out_of_plane=True`: out-of-plane buckling only. The static pre-solve uses the
+          supports as modelled, so the model must include its out-of-plane supports (column bases,
+          lateral and torsional restraints at eaves and purlins, ...). The eigenproblem then
+          restrains the in-plane DOFs (DX, DY, RZ), so only lateral and lateral-torsional modes
+          are returned. This is α_cr,op of EN 1993-1-1 6.3.4.
+
+        Because the in-plane and out-of-plane DOFs of a planar frame loaded in its plane are
+        uncoupled, the modes of the 3D analysis are the union of the modes of the other two.
+
+        Limitations
+        -----------
+        * Warping stiffness: the 6-DOF element has no warping DOF, so warping is neglected by
+          default. This is conservative for I-sections and can be significant for short spans.
+          `warping='equivalent_torsion'` replaces the torsion constant of every member by
+          `J + π²·E·Iw/(G·L²)`, with `L` the length of the physical member, in the eigenproblem.
+          This is exact for a member in uniform bending with fork supports at its ends and free
+          warping (k = k_w = 1 over the member length), approximate otherwise, and requires `Iw`
+          on every section. Members whose twist is restrained at interior nodes should be split
+          into separate physical members, otherwise the approximation stays on the safe side.
+        * Load height: loads are taken to act at the shear centre. The destabilising effect of a
+          load applied above the shear centre (top flange loading) is not included.
+        * Sections are taken as doubly symmetric with the shear centre at the centroid.
+        * The bending moment is taken to vary linearly over each element, so members carrying
+          distributed loads need the subdivision (8 elements per member keeps the error below
+          about 2 % on the benchmark problems; 16 brings it under 0.5 %).
+        * Tension-only and compression-only members are treated as active in the pre-solve.
+        * External nodal moments are treated as having no second-order work.
+
+        :param combo_name: Load combination used for the static pre-solve. Defaults to ``'Combo 1'``.
         :type combo_name: str, optional
         :param num_modes: Number of buckling modes to compute. Defaults to 5.
         :type num_modes: int, optional
-        :param log: Prints progress to the console when ``True``. Defaults to
-            ``False``.
+        :param log: Prints progress to the console when ``True``. Defaults to ``False``.
         :type log: bool, optional
+        :param plane: Restricts the analysis to a plane: ``'XY'``, ``'XZ'``, ``'YZ'``, or ``None``
+                      (default) for a full three-dimensional analysis. See above.
+        :type plane: str, optional
+        :param out_of_plane: With `plane` given, return only the out-of-plane modes by restraining
+                             the in-plane DOFs in the eigenproblem. Defaults to ``False``.
+        :type out_of_plane: bool, optional
+        :param elements_per_member: Elements each physical member is subdivided into for the
+                                    analysis. Defaults to 8. One element per member overestimates
+                                    the Euler load of a pin-ended member by 22 %.
+        :type elements_per_member: int, optional
+        :param include_moments: Include the bending moment, shear and torque terms of the geometric
+                                stiffness matrix. Defaults to ``True``. With ``False`` only the
+                                axial force terms are used, which is enough for in-plane analyses
+                                and reproduces the behaviour of earlier versions.
+        :type include_moments: bool, optional
+        :param warping: ``'ignore'`` (default) or ``'equivalent_torsion'``. See above.
+        :type warping: str, optional
         :return: Buckling results containing load multipliers and mode shapes.
         :rtype: BucklingResults
+        :raises ValueError: Occurs for invalid arguments, an unstable model, or a model without
+                            member forces under `combo_name`.
+        :raises RuntimeError: Occurs when the eigensolver fails.
         """
-        from .Analysis import buckling_analysis
+        from dataclasses import replace
+        from .Analysis import buckling_analysis, _set_force_timoshenko
 
         if log:
             print('+----------------------+')
             print('| Analyzing: Buckling  |')
             print('+----------------------+')
 
-        self._buckling_results = buckling_analysis(self, combo_name, num_modes)
+        # Validate the arguments before doing any work
+        if num_modes < 1:
+            raise ValueError(f'`num_modes` must be at least 1. {num_modes} was given.')
+
+        if elements_per_member < 1:
+            raise ValueError(
+                f'`elements_per_member` must be at least 1. {elements_per_member} was given.'
+            )
+
+        if plane not in (None, 'XY', 'XZ', 'YZ'):
+            raise ValueError(f"`plane` must be 'XY', 'XZ', 'YZ', or None. '{plane}' was given.")
+
+        if out_of_plane and plane is None:
+            raise ValueError("`out_of_plane=True` requires `plane` to be given ('XY', 'XZ' or 'YZ').")
+
+        if warping not in ('ignore', 'equivalent_torsion'):
+            raise ValueError(
+                f"`warping` must be 'ignore' or 'equivalent_torsion'. '{warping}' was given."
+            )
+
+        # Ensure there is a load combination to solve, as the other analysis methods do. Result
+        # combinations left by earlier modal or buckling runs do not count.
+        if not any(combo.combo_tags is None or not {'modal', 'buckling'} & set(combo.combo_tags)
+                   for combo in self.load_combos.values()):
+            self.load_combos['Combo 1'] = LoadCombo('Combo 1', factors={'Case 1': 1.0})
+
+        if log and elements_per_member > 1:
+            print(f'- Subdividing members into {elements_per_member} elements for analysis')
+
+        # For an in-plane analysis the out-of-plane DOFs are restrained at every node of the copy.
+        # For an out-of-plane analysis the model's own supports are kept for the static pre-solve,
+        # and the in-plane DOFs are restrained in the eigenproblem only.
+        if plane is not None and not out_of_plane:
+            if log:
+                print(f'- Restraining out-of-plane DOFs for an in-plane ({plane}) analysis')
+            model = self._modal_mesh_copy(elements_per_member, plane, node_prefix='_buckling')
+            eigen_restrained_dofs = ()
+        else:
+            model = self._modal_mesh_copy(elements_per_member, None, node_prefix='_buckling')
+            if out_of_plane:
+                if log:
+                    print(f'- Restraining in-plane DOFs in the eigenproblem for an out-of-plane ({plane}) analysis')
+                eigen_restrained_dofs = {'XY': (0, 1, 5), 'XZ': (0, 2, 4), 'YZ': (1, 2, 3)}[plane]
+            else:
+                eigen_restrained_dofs = ()
+
+        # Approximate warping stiffness with an equivalent torsion constant if requested
+        if warping == 'equivalent_torsion':
+            if log:
+                print('- Replacing torsion constants by equivalent torsion constants (warping)')
+            model._apply_equivalent_torsion_constant()
+
+        # Force the Timoshenko formulation for the eigenvalue analysis, as the modal analysis does.
+        # The flag stays on the analysis copy so that post-processing on it is consistent.
+        _set_force_timoshenko(model, True)
+
+        results = buckling_analysis(model, combo_name, num_modes, include_moments,
+                                    eigen_restrained_dofs, log)
+
+        results = replace(results, plane=plane, out_of_plane=out_of_plane,
+                          elements_per_member=elements_per_member, warping=warping)
+
+        # Bring the mode shapes back onto the model the caller actually holds
+        self._adopt_buckling_results(model, results)
 
         if log:
-            for i, lam in enumerate(self._buckling_results.load_multipliers):
+            for i, lam in enumerate(results.load_multipliers):
                 print(f'  Mode {i + 1}: λ = {lam:.4f}')
+            if results.truncated:
+                print(f'- WARNING: {num_modes} modes were requested but only {results.mode_count} were found')
             print('- Buckling analysis complete')
 
-        return self._buckling_results
+        return results
+
+    def _apply_equivalent_torsion_constant(self) -> None:
+        """Replaces each member's torsion constant by an equivalent torsion constant that approximates warping stiffness.
+
+        For a member of length `L` in uniform bending with fork supports and free warping at its
+        ends, the lateral-torsional critical moment is `M_cr = (π/L)·sqrt(E·Iz·(G·J + π²·E·Iw/L²))`,
+        which is the no-warping result with `J` replaced by `J_eff = J + π²·E·Iw/(G·L²)`. Applying
+        `J_eff` to every member carries that approximation into a general frame. The length is that
+        of the physical member, which assumes its twist is restrained at its end nodes; a longer
+        length than the real distance between torsional restraints understates the warping
+        contribution, so the approximation stays conservative in that case.
+
+        The override is set on the physical members and inherited by their sub-members when the
+        model is discretized for analysis. It only affects the elastic stiffness matrix.
+
+        :raises ValueError: Occurs when a section has no warping constant `Iw`.
+        """
+
+        missing = sorted(member.section.name for member in self.members.values()
+                         if member.section.Iw is None)
+
+        if missing:
+            raise ValueError(
+                "`warping='equivalent_torsion'` requires the warping constant `Iw` on every section. "
+                f"Missing on: {', '.join(dict.fromkeys(missing))}. Pass `Iw=` to `add_section`."
+            )
+
+        for member in self.members.values():
+            E = member.material.E
+            G = member.material.G
+            L = member.L()
+            member._J_eff = member.section.J + np.pi**2*E*member.section.Iw/(G*L**2)
+
+    def _adopt_buckling_results(self, model: FEModel3D, results) -> None:
+        """Copies buckling results from the subdivided analysis copy back onto this model.
+
+        Two sets of displacements come back. The mode shapes are stored under the `Buckling Mode n`
+        load combinations. The first-order displacements of the analysed load combination come back
+        too, replacing any results this model held for that combination, so that the member forces
+        behind the geometric stiffness matrix can be queried on this model as they could when the
+        analysis ran on the model itself. Only the nodes this model actually has are transferred;
+        the full mode shapes, including the values at the temporary subdivision nodes, remain
+        available on `results` along with the DOF map needed to interpret them.
+
+        :param model: The subdivided copy the analysis was run on.
+        :type model: FEModel3D
+        :param results: The results produced on that copy.
+        :type results: BucklingResults
+        """
+
+        # Recreate the buckling load combinations on this model
+        to_remove = [name for name, combo in self.load_combos.items()
+                     if combo.combo_tags is not None and 'buckling' in combo.combo_tags]
+
+        for name in to_remove:
+            self.load_combos.pop(name)
+
+        for mode in range(results.mode_count):
+            self.add_load_combo(f'Buckling Mode {mode + 1}', {}, ['buckling'])
+
+        # Number the nodes and discretize the physical members of this model, so that member forces
+        # can be queried from the transferred displacements. The copy was numbered in the same node
+        # order with its interior nodes appended, so the nodes this model has keep the same IDs.
+        Analysis._renumber(self)
+
+        # Transfer the mode shapes and the first-order displacements of the analysed combination
+        # for the nodes this model has, merging rather than replacing so that results for other
+        # combinations already on this model survive
+        transfer = [f'Buckling Mode {mode + 1}' for mode in range(results.mode_count)]
+        transfer.append(results.combo_name)
+
+        for name, node in self.nodes.items():
+
+            source = model.nodes[name]
+
+            for dof in ('DX', 'DY', 'DZ', 'RX', 'RY', 'RZ'):
+                stored = getattr(source, dof)
+                getattr(node, dof).update({combo: stored[combo] for combo in transfer if combo in stored})
+
+        # The global displacement vectors of this model's nodes are the leading block of the copy's
+        for combo in transfer:
+            if combo in model._D:
+                self._D[combo] = model._D[combo][:len(self.nodes)*6, :]
+
+        # The member forces of the analysed combination are now those of the first-order pre-solve,
+        # so any member segments cached from an earlier solution are stale
+        for phys_member in self.members.values():
+            phys_member._solved_combo = None
+            for sub_member in phys_member.sub_members.values():
+                sub_member._solved_combo = None
+
+        # Flag the model as holding buckling results. `Member3D.f()` treats this like a linear
+        # solution, which is what the stored displacements are.
+        self.solution = 'Buckling'
+        self._buckling_results = results
 
 # %%
     # Pushover results/query methods live with the pushover solver for locality.

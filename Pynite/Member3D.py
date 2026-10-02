@@ -4,7 +4,7 @@ from math import isclose
 
 from numpy import array, zeros, add, subtract, matmul, insert, dot, cross, divide, count_nonzero, concatenate
 from numpy import linspace, vstack, hstack, allclose, radians, sin, cos, maximum, minimum
-from numpy.linalg import inv, pinv, norm
+from numpy.linalg import inv, pinv, norm, solve
 
 import Pynite.FixedEndReactions
 from Pynite.BeamSegZ import BeamSegZ
@@ -101,6 +101,7 @@ class Member3D():
         self.comp_only: bool = comp_only  # Indicates whether the member is compression-only
         self.beam_type: str = beam_type  # 'timoshenko' or 'bernoulli'
         self._force_timoshenko: bool = False  # Internal flag: overrides beam_type for eigenvalue analysis
+        self._J_eff: float | None = None  # Internal override of the torsion constant (equivalent torsion constant for warping in buckling analysis)
 
         # Members need to track whether they are active or not for any given load combination. They may become inactive for a load combination during a tension/compression-only analysis. This dictionary will be used when the model is solved.
         self.active: Dict[str, bool] = {}  # Key = load combo name, Value = True or False
@@ -199,7 +200,7 @@ class Member3D():
         G = self.material.G
         Iy = self.section.Iy
         Iz = self.section.Iz
-        J = self.section.J
+        J = self.section.J if self._J_eff is None else self._J_eff  # `_J_eff` is only set by the buckling analysis
         A = self.section.A
         L = self.L()
 
@@ -232,15 +233,52 @@ class Member3D():
         # Return the uncondensed local stiffness matrix
         return ke
 
-    def kg(self, P: float = 0) -> NDArray[float64]:
+    def kg(self, P: float = 0.0, Myi: float = 0.0, Mzi: float = 0.0, Myj: float = 0.0,
+           Mzj: float = 0.0, Mxj: float = 0.0, elastic_condensation: bool = False) -> NDArray[float64]:
         """
         Returns the condensed (expanded) local geometric stiffness matrix for the member.
 
-        Parameters
-        ----------
-        P : number, optional
-            The axial force acting on the member (compression = +, tension = -)
+        The axial force terms are the classical consistent geometric stiffness matrix of a 3D beam
+        element (see McGuire, Gallagher & Ziemian, "Matrix Structural Analysis", 2nd Ed., Section
+        9.3). They produce flexural (Euler) buckling about both axes and, through the `Ip/A`
+        (Wagner) term, torsional buckling of doubly symmetric sections.
 
+        When end moments and/or a torque are given, the matrix is extended with the bending moment,
+        shear force and torque terms that couple lateral displacement, twist and the bending
+        rotations. These are the terms that produce lateral-torsional buckling of beams and
+        flexural-torsional buckling of beam-columns, i.e. out-of-plane buckling of members bent
+        in-plane. They are derived from the second-order work of the initial stresses using the
+        Green-Lagrange strain of a doubly symmetric thin-walled beam (shear centre at the centroid,
+        warping neglected), with the bending moments varying linearly between the end values. See
+        `Derivations/Geometric Stiffness Matrix - Moments and Torque.py`. Because the derivation is
+        not integrated by parts, the element needs no additional "joint moment" terms at
+        non-collinear joints: summing the element contributions gives the complete second-order
+        strain energy of the frame.
+
+        All arguments follow the sign convention of the member's local end force vector `f()`:
+        they are the actions on the member's ends, in the member's local coordinate system.
+
+        :param P: Axial force in the member. **Tension is positive**, compression is negative
+                  (`P = f[6] = -f[0]`). Defaults to 0.
+        :type P: float, optional
+        :param Myi: Moment about the local y-axis at the i-end (`f[4]`). Defaults to 0.
+        :type Myi: float, optional
+        :param Mzi: Moment about the local z-axis at the i-end (`f[5]`). Defaults to 0.
+        :type Mzi: float, optional
+        :param Myj: Moment about the local y-axis at the j-end (`f[10]`). Defaults to 0.
+        :type Myj: float, optional
+        :param Mzj: Moment about the local z-axis at the j-end (`f[11]`). Defaults to 0.
+        :type Mzj: float, optional
+        :param Mxj: Torque at the j-end (`f[9]`), equal to the internal torque. Defaults to 0.
+        :type Mxj: float, optional
+        :param elastic_condensation: How end releases are condensed out. `False` (default) condenses
+                                     the geometric stiffness matrix on its own, which is how Pynite's
+                                     P-Delta analysis has always done it. `True` uses the elastic
+                                     constraint between the released and retained DOFs (a Guyan
+                                     reduction), which stays well defined when the moment terms are
+                                     present and the axial force is small. The buckling analysis
+                                     uses `True`.
+        :type elastic_condensation: bool, optional
         :return: The condensed local geometric stiffness matrix
         :rtype: NDArray[float64]
         """
@@ -250,7 +288,7 @@ class Member3D():
         A = self.section.A
         L = self.L()
 
-        # Create the uncondensed local geometric stiffness matrix
+        # Create the uncondensed local geometric stiffness matrix for the axial force
         kg = array([[1,  0,    0,     0,     0,         0,         -1, 0,     0,    0,     0,         0        ],
                     [0,  6/5,  0,     0,     0,         L/10,      0,  -6/5,  0,    0,     0,         L/10     ],
                     [0,  0,    6/5,   0,     -L/10,     0,         0,  0,     -6/5, 0,     -L/10,     0        ],
@@ -266,13 +304,27 @@ class Member3D():
 
         kg = kg*P/L
 
+        # Add the bending moment, shear force and torque terms if any were given
+        if Myi != 0.0 or Mzi != 0.0 or Myj != 0.0 or Mzj != 0.0 or Mxj != 0.0:
+            kg = add(kg, self._kg_moments(L, Myi, Mzi, Myj, Mzj, Mxj))
+
         # Partition the geometric stiffness matrix as 4 submatrices in
         # preparation for static condensation
         kg11, kg12, kg21, kg22 = self._partition(kg)
 
         # Calculate the condensed local geometric stiffness matrix
-        # Note that a matrix of zeros cannot be inverted, so if P is 0 an error will occur
-        if isclose(P, 0.0):
+        if elastic_condensation:
+            # Condense the released DOFs using the elastic constraint between the released and
+            # retained DOFs: d_released = Tc @ d_retained (Guyan reduction). This is exact for a
+            # pin-ended bar and stays well defined for any combination of axial force and moments.
+            ke11, ke12, ke21, ke22 = self._partition(self._ke_unc())
+            if ke22.size > 0:
+                Tc = -solve(ke22, ke21)
+                kg_Condensed = kg11 + kg12 @ Tc + Tc.T @ kg21 + Tc.T @ kg22 @ Tc
+            else:
+                kg_Condensed = kg11
+        elif isclose(P, 0.0):
+            # Note that a matrix of zeros cannot be inverted, so if P is 0 an error would occur
             kg_Condensed = zeros(kg11.shape)
         else:
             kg_Condensed = subtract(kg11, matmul(matmul(kg12, inv(kg22)), kg21))
@@ -289,6 +341,77 @@ class Member3D():
 
         # Return the local geomtric stiffness matrix, with end releases applied
         return kg_Condensed
+
+    @staticmethod
+    def _kg_moments(L: float, Myi: float, Mzi: float, Myj: float, Mzj: float, Mxj: float) -> NDArray[float64]:
+        """Returns the bending moment, shear force and torque part of the uncondensed local geometric stiffness matrix.
+
+        The terms come from the second-order work of the initial stresses (see `kg`). With the
+        internal moments varying linearly from `-Mzi` and `-Myi` at the i-end to `Mzj` and `Myj`
+        at the j-end, the shear forces are `Vy = -(Mzi + Mzj)/L` and `Vz = (Myi + Myj)/L`, and the
+        internal torque is `Mxj`. Cubic Hermite interpolation is used for the lateral displacements
+        and linear interpolation for the twist, matching the elastic stiffness matrix.
+
+        :param L: The member length.
+        :type L: float
+        :param Myi: Moment about the local y-axis at the i-end (action on the member).
+        :type Myi: float
+        :param Mzi: Moment about the local z-axis at the i-end (action on the member).
+        :type Mzi: float
+        :param Myj: Moment about the local y-axis at the j-end (action on the member).
+        :type Myj: float
+        :param Mzj: Moment about the local z-axis at the j-end (action on the member).
+        :type Mzj: float
+        :param Mxj: Torque at the j-end (action on the member).
+        :type Mxj: float
+        :return: The moment and torque part of the uncondensed local geometric stiffness matrix
+        :rtype: NDArray[float64]
+        """
+
+        kg = zeros((12, 12))
+
+        # Helper to place a symmetric pair of terms
+        def place(i: int, j: int, value: float) -> None:
+            kg[i, j] += value
+            kg[j, i] += value
+
+        T = Mxj          # Internal torque
+        Mz = (Mzi + Mzj)/6  # Shear force term, -Vy*L/6
+        My = (Myi + Myj)/6  # Shear force term, Vz*L/6
+
+        # Coupling between the lateral displacements and the twist (bending moments)
+        place(1, 3, Myi/L)    # v_i  - θx_i
+        place(1, 9, Myj/L)    # v_i  - θx_j
+        place(2, 3, Mzi/L)    # w_i  - θx_i
+        place(2, 9, Mzj/L)    # w_i  - θx_j
+        place(3, 7, -Myi/L)   # θx_i - v_j
+        place(3, 8, -Mzi/L)   # θx_i - w_j
+        place(7, 9, -Myj/L)   # v_j  - θx_j
+        place(8, 9, -Mzj/L)   # w_j  - θx_j
+
+        # Coupling between the twist and the bending rotations (shear forces)
+        place(3, 4, Mz)       # θx_i - θy_i
+        place(3, 5, -My)      # θx_i - θz_i
+        place(3, 10, -Mz)     # θx_i - θy_j
+        place(3, 11, My)      # θx_i - θz_j
+        place(4, 9, -Mz)      # θy_i - θx_j
+        place(5, 9, My)       # θz_i - θx_j
+        place(9, 10, Mz)      # θx_j - θy_j
+        place(9, 11, -My)     # θx_j - θz_j
+
+        # Coupling between the two bending planes (torque)
+        place(1, 4, T/L)      # v_i  - θy_i
+        place(1, 10, -T/L)    # v_i  - θy_j
+        place(2, 5, T/L)      # w_i  - θz_i
+        place(2, 11, -T/L)    # w_i  - θz_j
+        place(4, 7, -T/L)     # θy_i - v_j
+        place(4, 11, T/2)     # θy_i - θz_j
+        place(5, 8, -T/L)     # θz_i - w_j
+        place(5, 10, -T/2)    # θz_i - θy_j
+        place(7, 10, T/L)     # v_j  - θy_j
+        place(8, 11, T/L)     # w_j  - θz_j
+
+        return kg
 
     def km(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """Returns the local plastic reduction matrix for the element.
@@ -1269,17 +1392,33 @@ class Member3D():
         # Calculate and return the stiffness matrix in global coordinates
         return matmul(matmul(inv(self.T()), self.ke()), self.T())
 
-    def Kg(self, P: float=0.0):
-        """Returns the global geometric stiffness matrix for the member. Used for P-Delta analysis.
+    def Kg(self, P: float = 0.0, Myi: float = 0.0, Mzi: float = 0.0, Myj: float = 0.0,
+           Mzj: float = 0.0, Mxj: float = 0.0, elastic_condensation: bool = False) -> NDArray[float64]:
+        """Returns the global geometric stiffness matrix for the member. Used for P-Delta and buckling analysis.
 
-        :param P: Member axial load. Defaults to 0.
+        See `kg` for the meaning and sign convention of the arguments.
+
+        :param P: Member axial force, tension positive. Defaults to 0.
         :type P: float, optional
+        :param Myi: Moment about the local y-axis at the i-end. Defaults to 0.
+        :type Myi: float, optional
+        :param Mzi: Moment about the local z-axis at the i-end. Defaults to 0.
+        :type Mzi: float, optional
+        :param Myj: Moment about the local y-axis at the j-end. Defaults to 0.
+        :type Myj: float, optional
+        :param Mzj: Moment about the local z-axis at the j-end. Defaults to 0.
+        :type Mzj: float, optional
+        :param Mxj: Torque at the j-end. Defaults to 0.
+        :type Mxj: float, optional
+        :param elastic_condensation: Condense end releases with the elastic constraint (see `kg`). Defaults to `False`.
+        :type elastic_condensation: bool, optional
         :return: The global geometric stiffness matrix for the member.
         :rtype: array
         """
 
         # Calculate and return the geometric stiffness matrix in global coordinates
-        return matmul(matmul(inv(self.T()), self.kg(P)), self.T())
+        kg = self.kg(P, Myi, Mzi, Myj, Mzj, Mxj, elastic_condensation)
+        return matmul(matmul(inv(self.T()), kg), self.T())
 
     def Km(self, combo_name: str) -> NDArray[float64]:
         """Returns the global plastic reduction matrix for the member. Used to modify member behavior for plastic hinges at the ends.

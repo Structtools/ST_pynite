@@ -136,6 +136,9 @@ class PhysMember(Member3D):
             # Propagate force_timoshenko flag (used during eigenvalue analysis)
             new_sub_member._force_timoshenko = self._force_timoshenko
 
+            # Propagate the torsion constant override (used by the buckling analysis to approximate warping)
+            new_sub_member._J_eff = self._J_eff
+
             # Flag the sub-member as active
             for combo_name in self.model.load_combos.keys():
                 new_sub_member.active[combo_name] = True

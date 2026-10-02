@@ -725,8 +725,9 @@ def main_beam_mcr(p):
     )
     print(SEP)
     print()
-    print("  Note: PyNite uses 6-DOF elements (no warping DOF).")
-    print("  LTB cannot be extracted from the eigenvalue; use the formula above.")
+    print("  Note: PyNite uses 6-DOF elements (no warping DOF). The eigenvalue analysis finds")
+    print("  LTB modes without warping (or with the equivalent torsion constant approximation,")
+    print("  warping='equivalent_torsion'); the formula above includes warping in closed form.")
     print()
     print("  Done.")
 
