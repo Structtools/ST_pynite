@@ -117,6 +117,13 @@ LOAD_B = 0.0  # left column top   (node B)
 LOAD_C = 0.0  # middle column top (node C)
 LOAD_D = 0.0  # right column top  (node D) -- ignored if B2 = 0
 
+# --- Load height of the beam loads (m) --------------------------------------
+# Distance from the shear centre to the point of application of the beam loads, measured along
+# the load's line of action: positive when the load acts towards the shear centre (gravity load
+# on the top flange, destabilising), negative when it acts away from it. EN 1993-1-1 Annex F
+# z_g convention. Only affects the buckling analysis. 0.0 = load at the shear centre.
+LOAD_HEIGHT = 0.0
+
 # --- Optional beam point loads at midspan (N) -------------------------------
 # Global FY; negative = downward. Applied at x = L/2 from member i-end.
 BEAM_MID_LOAD_1 = 0.0  # Beam1 (B->C)
@@ -391,15 +398,15 @@ def build_model():
 
     # --- Distributed beam loads ----------------------------------------------
     if BEAM_LOAD_1 != 0.0:
-        model.add_member_dist_load("Beam1", "FY", BEAM_LOAD_1, BEAM_LOAD_1)
+        model.add_member_dist_load("Beam1", "FY", BEAM_LOAD_1, BEAM_LOAD_1, load_height=LOAD_HEIGHT)
     if two_bay and BEAM_LOAD_2 != 0.0:
-        model.add_member_dist_load("Beam2", "FY", BEAM_LOAD_2, BEAM_LOAD_2)
+        model.add_member_dist_load("Beam2", "FY", BEAM_LOAD_2, BEAM_LOAD_2, load_height=LOAD_HEIGHT)
 
     # --- Beam midspan point loads (global FY) -------------------------------
     if BEAM_MID_LOAD_1 != 0.0:
-        model.add_member_pt_load("Beam1", "FY", BEAM_MID_LOAD_1, B1 / 2)
+        model.add_member_pt_load("Beam1", "FY", BEAM_MID_LOAD_1, B1 / 2, load_height=LOAD_HEIGHT)
     if two_bay and BEAM_MID_LOAD_2 != 0.0:
-        model.add_member_pt_load("Beam2", "FY", BEAM_MID_LOAD_2, B2 / 2)
+        model.add_member_pt_load("Beam2", "FY", BEAM_MID_LOAD_2, B2 / 2, load_height=LOAD_HEIGHT)
 
     # --- Optional column-top point loads -------------------------------------
     if LOAD_B != 0.0:

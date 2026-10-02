@@ -63,6 +63,20 @@ With the member's local end force vector f = [fx_i, fy_i, fz_i, mx_i, my_i, mz_i
 
 Interpolation: linear for u and φ, cubic Hermite for v and w (as in the elastic matrix).
 
+Load height
+-----------
+A transverse load p (per unit length, or a point load P) applied at a distance z_g from the
+shear centre along its own line of action moves by z_g (1 - cos φ) ≈ z_g φ²/2 along that line
+when the section twists by φ. With z_g positive for a load acting towards the shear centre
+(EN 1993-1-1 Annex F), its second-order potential is -½ |p| z_g φ², which adds
+
+    kg_load = -z_g ∫ |p(x)| Nφᵀ Nφ dx        (distributed)
+    kg_load = -|P| z_g Nφ(x)ᵀ Nφ(x)           (point load at x)
+
+to the twist DOFs. For a uniform load over the whole element this is -|p| z_g L/6 [[2, 1], [1, 2]]
+on (θx_i, θx_j); the script prints the general linearly varying case. These terms are implemented
+in `Member3D._kg_load_height`, which integrates them with a 3-point Gauss rule.
+
 Verification
 ------------
 The resulting matrix reproduces, with 16 elements and to within 0.2 %, the classical closed-form
@@ -141,3 +155,17 @@ for i in range(12):
     for j in range(i, 12):
         if kg_M[i, j] != 0:
             print(f'  ({i + 1:2d},{j + 1:2d}): {sp.factor(kg_M[i, j])}')
+
+# Load height term for a load varying linearly from p1 at x1 to p2 at x2 (same sign throughout),
+# applied at height z_g, on the twist DOFs (theta_x_i, theta_x_j)
+p1, p2, x1, x2, zg = sp.symbols('p1 p2 x1 x2 z_g', real=True)
+p_load = p1 + (p2 - p1)*(x - x1)/(x2 - x1)
+Nphi2 = sp.Matrix([[N1], [N2]])
+kg_load = sp.simplify(-zg*sp.integrate(p_load*Nphi2*Nphi2.T, (x, x1, x2)))
+
+print()
+print('Load height part on (theta_x_i, theta_x_j) for a linearly varying load p1..p2 on [x1, x2]:')
+sp.pprint(sp.factor(kg_load))
+print()
+print('Uniform load p over the whole element (x1 = 0, x2 = L):')
+sp.pprint(sp.simplify(kg_load.subs({p2: p1, x1: 0, x2: L})))

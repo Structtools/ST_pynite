@@ -2,7 +2,7 @@ from __future__ import annotations  # Allows more recent type hints features
 from typing import TYPE_CHECKING, Literal, Union, List
 from math import isclose
 
-from numpy import array, zeros, add, subtract, matmul, insert, dot, cross, divide, count_nonzero, concatenate
+from numpy import array, zeros, add, subtract, matmul, insert, dot, cross, divide, count_nonzero, concatenate, outer
 from numpy import linspace, vstack, hstack, allclose, radians, sin, cos, maximum, minimum
 from numpy.linalg import inv, pinv, norm, solve
 
@@ -234,7 +234,8 @@ class Member3D():
         return ke
 
     def kg(self, P: float = 0.0, Myi: float = 0.0, Mzi: float = 0.0, Myj: float = 0.0,
-           Mzj: float = 0.0, Mxj: float = 0.0, elastic_condensation: bool = False) -> NDArray[float64]:
+           Mzj: float = 0.0, Mxj: float = 0.0, elastic_condensation: bool = False,
+           combo_name: str | None = None) -> NDArray[float64]:
         """
         Returns the condensed (expanded) local geometric stiffness matrix for the member.
 
@@ -279,6 +280,9 @@ class Member3D():
                                      present and the axial force is small. The buckling analysis
                                      uses `True`.
         :type elastic_condensation: bool, optional
+        :param combo_name: If given, the load height terms of the member loads in this load
+                           combination are included (see `_kg_load_height`). Defaults to `None`.
+        :type combo_name: str, optional
         :return: The condensed local geometric stiffness matrix
         :rtype: NDArray[float64]
         """
@@ -307,6 +311,10 @@ class Member3D():
         # Add the bending moment, shear force and torque terms if any were given
         if Myi != 0.0 or Mzi != 0.0 or Myj != 0.0 or Mzj != 0.0 or Mxj != 0.0:
             kg = add(kg, self._kg_moments(L, Myi, Mzi, Myj, Mzj, Mxj))
+
+        # Add the load height terms of the member loads if a load combination was given
+        if combo_name is not None:
+            kg = add(kg, self._kg_load_height(combo_name))
 
         # Partition the geometric stiffness matrix as 4 submatrices in
         # preparation for static condensation
@@ -410,6 +418,91 @@ class Member3D():
         place(5, 10, -T/2)    # θz_i - θy_j
         place(7, 10, T/L)     # v_j  - θy_j
         place(8, 11, T/L)     # w_j  - θz_j
+
+        return kg
+
+    def _kg_load_height(self, combo_name: str) -> NDArray[float64]:
+        """Returns the load height part of the uncondensed local geometric stiffness matrix.
+
+        A transverse load `p` applied at a distance `z_g` from the shear centre, measured along its
+        line of action, moves by `z_g·φ²/2` along that line when the section twists by `φ`. With
+        `z_g` positive for a load acting towards the shear centre (the EN 1993-1-1 Annex F
+        convention), the load does second-order work `|p|·z_g·φ²/2`, so its second-order potential
+        is `-½·|p|·z_g·φ²` and it adds `-|p|·z_g` to the stiffness of the twist: destabilising for a
+        gravity load on the top flange, stabilising for a load hanging from the bottom flange.
+
+        The twist is interpolated linearly between the member ends, as in the rest of the geometric
+        stiffness matrix. A point load contributes `-|P|·z_g·N(x)ᵀN(x)` at its location and a
+        distributed load `-z_g·∫|w(x)|·N(x)ᵀN(x) dx`, integrated with a 3-point Gauss rule, which is
+        exact for a linearly varying load that does not change sign. Only the component of a load
+        transverse to the member contributes; axial components and moments have no load height
+        effect. Loads are factored by the load combination.
+
+        :param combo_name: The load combination whose member loads are considered.
+        :type combo_name: str
+        :return: The load height part of the uncondensed local geometric stiffness matrix
+        :rtype: NDArray[float64]
+        """
+
+        kg = zeros((12, 12))
+        combo = self.model.load_combos[combo_name]
+        L = self.L()
+
+        # Direction cosines: rows are the local x, y, z unit vectors in global coordinates
+        dir_cos = self.T()[:3, :3]
+
+        def transverse_fraction(direction: str) -> float:
+            """The fraction of a unit force in `direction` that acts transverse to the member."""
+            if direction in ('Fy', 'Fz'):
+                return 1.0
+            if direction == 'Fx':
+                return 0.0
+            # Global direction: local components of the global unit vector
+            local = dir_cos[:, {'FX': 0, 'FY': 1, 'FZ': 2}[direction]]
+            return float((local[1]**2 + local[2]**2)**0.5)
+
+        def add_twist_term(k: float, x: float) -> None:
+            """Adds `k·N(x)ᵀN(x)` to the twist DOFs θx_i (3) and θx_j (9)."""
+            N = array([1 - x/L, x/L])
+            block = k*outer(N, N)
+            kg[3, 3] += block[0, 0]
+            kg[3, 9] += block[0, 1]
+            kg[9, 3] += block[1, 0]
+            kg[9, 9] += block[1, 1]
+
+        # 3-point Gauss-Legendre rule on [-1, 1]
+        gauss = ((-(3/5)**0.5, 5/9), (0.0, 8/9), ((3/5)**0.5, 5/9))
+
+        # Loop through each load case and factor in the load combination
+        for case, factor in combo.factors.items():
+
+            for pt_load in self.PtLoads:
+
+                # Skip loads of other cases, loads without a load height, and moments
+                if pt_load[3] != case or len(pt_load) < 5 or pt_load[4] == 0.0 or pt_load[0][0] != 'F':
+                    continue
+
+                p = abs(factor*pt_load[1])*transverse_fraction(pt_load[0])
+                add_twist_term(-p*pt_load[4], pt_load[2])
+
+            for dist_load in self.DistLoads:
+
+                # Skip loads of other cases and loads without a load height
+                if dist_load[5] != case or len(dist_load) < 8 or dist_load[7] == 0.0:
+                    continue
+
+                fraction = transverse_fraction(dist_load[0])
+                w1, w2, x1, x2 = factor*dist_load[1], factor*dist_load[2], dist_load[3], dist_load[4]
+                z_g = dist_load[7]
+
+                if fraction == 0.0 or x2 <= x1:
+                    continue
+
+                # Integrate -|w(x)|·z_g·N(x)ᵀN(x) over the loaded length
+                for xi, weight in gauss:
+                    x = (x1 + x2)/2 + (x2 - x1)/2*xi
+                    w = w1 + (w2 - w1)*(x - x1)/(x2 - x1)
+                    add_twist_term(-abs(w)*fraction*z_g*weight*(x2 - x1)/2, x)
 
         return kg
 
@@ -574,7 +667,7 @@ class Member3D():
         for dist_load in self.DistLoads:
 
             # Extract values from this distributed load
-            load_dir, w1, w2, x1, x2, case, self_weight = dist_load
+            load_dir, w1, w2, x1, x2, case, self_weight = dist_load[:7]
 
             # Check if this is a self-weight load and if it's part of the mass combo
             if self_weight and case in mass_combo.factors.keys():
@@ -842,7 +935,7 @@ class Member3D():
         for pt_load in self.PtLoads:
 
             # Retrieve the load's components for clearer reference below
-            load_dir, P, x, load_case = pt_load
+            load_dir, P, x, load_case = pt_load[:4]
 
             # Step through each load case and load factor in the mass load combo
             for case, factor in mass_combo.factors.items():
@@ -859,7 +952,7 @@ class Member3D():
         for dist_load in self.DistLoads:
 
             # Retrieve the load's components for clearer reference below
-            load_dir, w1, w2, x1, x2, load_case, self_weight = dist_load
+            load_dir, w1, w2, x1, x2, load_case, self_weight = dist_load[:7]
 
             # Self-weight is handled by the consistent material mass matrix instead
             if self_weight:
@@ -1393,7 +1486,8 @@ class Member3D():
         return matmul(matmul(inv(self.T()), self.ke()), self.T())
 
     def Kg(self, P: float = 0.0, Myi: float = 0.0, Mzi: float = 0.0, Myj: float = 0.0,
-           Mzj: float = 0.0, Mxj: float = 0.0, elastic_condensation: bool = False) -> NDArray[float64]:
+           Mzj: float = 0.0, Mxj: float = 0.0, elastic_condensation: bool = False,
+           combo_name: str | None = None) -> NDArray[float64]:
         """Returns the global geometric stiffness matrix for the member. Used for P-Delta and buckling analysis.
 
         See `kg` for the meaning and sign convention of the arguments.
@@ -1412,12 +1506,14 @@ class Member3D():
         :type Mxj: float, optional
         :param elastic_condensation: Condense end releases with the elastic constraint (see `kg`). Defaults to `False`.
         :type elastic_condensation: bool, optional
+        :param combo_name: Include the load height terms of the member loads in this combination (see `kg`). Defaults to `None`.
+        :type combo_name: str, optional
         :return: The global geometric stiffness matrix for the member.
         :rtype: array
         """
 
         # Calculate and return the geometric stiffness matrix in global coordinates
-        kg = self.kg(P, Myi, Mzi, Myj, Mzj, Mxj, elastic_condensation)
+        kg = self.kg(P, Myi, Mzi, Myj, Mzj, Mxj, elastic_condensation, combo_name)
         return matmul(matmul(inv(self.T()), kg), self.T())
 
     def Km(self, combo_name: str) -> NDArray[float64]:

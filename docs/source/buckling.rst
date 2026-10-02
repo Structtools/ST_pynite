@@ -30,6 +30,16 @@ The member geometric stiffness matrix contains two groups of terms (see ``Member
   flexural-torsional buckling of beam-columns. They are what makes an out-of-plane analysis of a
   frame loaded in its plane meaningful. They are included by default and can be switched off with
   ``include_moments=False``, which reproduces the axial-force-only behaviour of earlier versions.
+- **Load height terms**: a transverse member load applied at a distance :math:`z_g` from the
+  shear centre moves by :math:`z_g\varphi^2/2` along its line of action when the section twists
+  by :math:`\varphi`, and so adds :math:`-|p|\,z_g` to the twist stiffness. Give the height with
+  ``add_member_pt_load(..., load_height=z_g)`` or ``add_member_dist_load(..., load_height=z_g)``.
+  Following EN 1993-1-1 Annex F, :math:`z_g` is positive when the load acts towards the shear
+  centre (a gravity load on the top flange, destabilising) and negative when it acts away from it
+  (a load hanging from the bottom flange, or uplift on the top flange, stabilising). The
+  convention is tied to the load's line of action, so it does not depend on the member's
+  rotation or on whether the load is given in local or global coordinates. Load height only
+  affects the buckling analysis; static results are unchanged. Nodal loads act at the node.
 
 The moment terms are derived from the second-order work of the initial stresses with the
 Green-Lagrange strain of a doubly symmetric thin-walled beam, with the moment varying linearly
@@ -120,7 +130,15 @@ Fork-supported beam, uniform load                    :math:`28.3\sqrt{EI_y GJ}/L
 Cantilever beam, tip load                            :math:`4.013\sqrt{EI_y GJ}/L^2`         0.09 %
 Laterally clamped beam, uniform moment               :math:`(2\pi/L)\sqrt{EI_y GJ}`          0.64 %
 Fork-supported beam, uniform moment, with warping    :math:`(\pi/L)\sqrt{EI_y(GJ+\pi^2EI_w/L^2)}`  0.16 %
+Rigid cantilever, tip load at height :math:`z_g`     :math:`GJ/(L z_g)` (pure twist)           exact
+Rigid cantilever, uniform load at height :math:`z_g` :math:`(\pi/2)^2 GJ/(L^2 z_g)`            0.08 %
 ===================================================  ======================================  ==========
+
+The load height terms are also checked against Timoshenko & Gere's first-order correction for a
+cantilever, :math:`P_{cr}(a) \approx P_{cr}(0)\,(1 - a\sqrt{EI/GJ}/L)`, and against the
+EN 1993-1-1 Annex F three-factor formula (:math:`C_1 = 1.365`, :math:`C_2 = 0.553`) for a
+fork-supported beam with a central point load on the top and bottom flange, which agree to
+within the accuracy of those formulas (0.1 % and 3 %).
 
 The in-plane results for several portal frames have also been compared with FEM Design; see
 ``Testing/comparison_summary.md``.
@@ -151,8 +169,8 @@ Warping
    :math:`I_w = 0`, not a numerical artifact.
 
 Load height
-   Loads are taken to act at the shear centre. The destabilising effect of a load applied above
-   the shear centre (top flange loading) is not included.
+   Member loads act at the shear centre unless a ``load_height`` is given. Nodal loads always act
+   at the node; apply a load with a height as a member point load at the member end instead.
 
 Sections
    Sections are taken as doubly symmetric with the shear centre at the centroid.

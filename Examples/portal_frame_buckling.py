@@ -22,7 +22,12 @@ h = 3.0     # Column height
 b = 5.0     # Beam span
 w = -10e3   # Uniform load on the beam (N/m, downward)
 
-def build_frame(brace_eaves: bool) -> FEModel3D:
+# Height of the beam load above the shear centre. Purlins sit on the top flange, 100 mm above the
+# centroid of an IPE200. Positive means the load acts towards the shear centre (destabilising);
+# an uplift load on the top flange would get a negative value. EN 1993-1-1 Annex F convention.
+z_g = 0.1
+
+def build_frame(brace_eaves: bool, load_height: float = 0.0) -> FEModel3D:
 
     model = FEModel3D()
     model.add_material('Steel', E, G, 0.3, 0.0)
@@ -48,7 +53,8 @@ def build_frame(brace_eaves: bool) -> FEModel3D:
         model.def_support('B', False, False, True, True, False, False)
         model.def_support('C', False, False, True, True, False, False)
 
-    model.add_member_dist_load('Beam', 'FY', w, w)
+    # Load height only affects the buckling analysis; the static results are the same either way
+    model.add_member_dist_load('Beam', 'FY', w, w, load_height=load_height)
 
     return model
 
@@ -76,6 +82,11 @@ for brace_eaves in (False, True):
     with_warping = model.analyze_buckling(num_modes=3, plane='XY', out_of_plane=True,
                                           warping='equivalent_torsion')
     print('  with warping approx:', ', '.join(f'{lam:8.2f}' for lam in with_warping.load_multipliers))
+
+    # The same with the beam load applied at the top flange instead of the shear centre
+    top_flange = build_frame(brace_eaves, load_height=z_g)
+    top_flange_results = top_flange.analyze_buckling(num_modes=3, plane='XY', out_of_plane=True)
+    print('  load on top flange :', ', '.join(f'{lam:8.2f}' for lam in top_flange_results.load_multipliers))
 
     # 3. Full 3D analysis: the modes of 1 and 2 together, each labelled
     full = model.analyze_buckling(num_modes=4)

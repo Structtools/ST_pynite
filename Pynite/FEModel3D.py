@@ -1424,7 +1424,8 @@ class FEModel3D():
         # Flag the model as unsolved
         self.solution = None
 
-    def add_member_pt_load(self, member_name:str, direction:str, P:float, x:float, case:str = 'Case 1'):
+    def add_member_pt_load(self, member_name:str, direction:str, P:float, x:float, case:str = 'Case 1',
+                           load_height: float = 0.0):
         """Adds a member point load to the model.
 
         :param member_name: The name of the member the load is being applied to.
@@ -1441,16 +1442,32 @@ class FEModel3D():
         :type x: float
         :param case: The load case to categorize the load under. Defaults to 'Case 1'.
         :type case: str, optional
-        :raises ValueError: Occurs when an invalid load direction has been specified.
+        :param load_height: Distance from the shear centre to the point where the load is applied,
+                            measured along the load's line of action. Positive when the load acts
+                            towards the shear centre, e.g. a gravity load on the top flange
+                            (destabilising), negative when it acts away from it, e.g. a load hanging
+                            from the bottom flange or an uplift load on the top flange
+                            (stabilising). This is the `z_g` convention of EN 1993-1-1 Annex F.
+                            Only used by the buckling analysis, where it adds the second-order
+                            work of the load to the geometric stiffness; the static analysis is
+                            unaffected. Only force loads can have a load height. Defaults to 0.0
+                            (load at the shear centre).
+        :type load_height: float, optional
+        :raises ValueError: Occurs when an invalid load direction has been specified, or a load
+                            height is given for a moment.
         """
 
         # Validate the value of direction
         if direction not in ('Fx', 'Fy', 'Fz', 'FX', 'FY', 'FZ', 'Mx', 'My', 'Mz', 'MX', 'MY', 'MZ'):
             raise ValueError(f"direction must be 'Fx', 'Fy', 'Fz', 'FX', 'FY', FZ', 'Mx', 'My', 'Mz', 'MX', 'MY', or 'MZ'. {direction} was given.")
 
+        # A load height only makes sense for a force
+        if load_height != 0.0 and direction[0] != 'F':
+            raise ValueError(f"A load height cannot be given for a moment ({direction}).")
+
         # Add the point load to the member
         try:
-            self.members[member_name].PtLoads.append((direction, P, x, case))
+            self.members[member_name].PtLoads.append((direction, P, x, case, load_height))
         except KeyError:
             raise NameError(f"Member '{member_name}' does not exist in the model")
 
@@ -1459,7 +1476,8 @@ class FEModel3D():
 
     def add_member_dist_load(self, member_name: str, direction: str, w1: float, w2: float,
                              x1: float | None = None, x2: float | None = None,
-                             case: str = 'Case 1', self_weight: bool = False):
+                             case: str = 'Case 1', self_weight: bool = False,
+                             load_height: float = 0.0):
         """Adds a member distributed load to the model.
 
         :param member_name: The name of the member the load is being appied to.
@@ -1484,6 +1502,16 @@ class FEModel3D():
         :type case: str, optional
         :param self_weight: Indicates whether this load is a self-weight load. Only set this to True if you are entering member self weight manually instead of using the `add_member_self_weight` method. This parameter is used by the modal analysis engine to determine whether to create a lumped mass for the load. Self-weight loads are already accounted for in modal analysis using a consistent mass matrix, so creating an additional lumped mass incorrect. Typically you will leave this value at the default value of `False`.
         :type self_weight: bool, optional
+        :param load_height: Distance from the shear centre to the line along which the load is
+                            applied, measured along the load's line of action. Positive when the
+                            load acts towards the shear centre, e.g. a gravity load on the top
+                            flange (destabilising), negative when it acts away from it, e.g. an
+                            uplift load on the top flange (stabilising). This is the `z_g`
+                            convention of EN 1993-1-1 Annex F. Only used by the buckling analysis;
+                            the static analysis is unaffected. A load that changes sign along the
+                            member should be split into two loads. Defaults to 0.0 (load at the
+                            shear centre).
+        :type load_height: float, optional
         :raises ValueError: Occurs when an invalid load direction has been specified.
         """
 
@@ -1504,7 +1532,7 @@ class FEModel3D():
 
         # Add the distributed load to the member
         try:
-            self.members[member_name].DistLoads.append((direction, w1, w2, start, end, case, self_weight))
+            self.members[member_name].DistLoads.append((direction, w1, w2, start, end, case, self_weight, load_height))
         except KeyError:
             raise NameError(f"Member '{member_name}' does not exist in the model")
 
@@ -1948,7 +1976,9 @@ class FEModel3D():
 
                     # Get the member's global stiffness matrix
                     # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
-                    member_Kg = member.Kg(P, elastic_condensation=include_moments, **moments)
+                    # With the moment terms, the load height terms of the member loads are included too
+                    member_Kg = member.Kg(P, elastic_condensation=include_moments,
+                                          combo_name=combo_name if include_moments else None, **moments)
 
                     # Step through each term in the member's stiffness matrix
                     # 'a' & 'b' below are row/column indices in the member's stiffness matrix
@@ -3372,8 +3402,8 @@ class FEModel3D():
           warping (k = k_w = 1 over the member length), approximate otherwise, and requires `Iw`
           on every section. Members whose twist is restrained at interior nodes should be split
           into separate physical members, otherwise the approximation stays on the safe side.
-        * Load height: loads are taken to act at the shear centre. The destabilising effect of a
-          load applied above the shear centre (top flange loading) is not included.
+        * Load height: member loads act at the shear centre unless a `load_height` is given with
+          `add_member_pt_load` or `add_member_dist_load`. Nodal loads always act at the node.
         * Sections are taken as doubly symmetric with the shear centre at the centroid.
         * The bending moment is taken to vary linearly over each element, so members carrying
           distributed loads need the subdivision (8 elements per member keeps the error below

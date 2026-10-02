@@ -165,6 +165,7 @@ class PhysMember(Member3D):
                     w2 = dist_load[2]
                     case = dist_load[5]
                     self_weight = dist_load[6]
+                    load_height = dist_load[7] if len(dist_load) > 7 else 0.0
 
                     # Equation describing the load as a function of x
                     # Linear interpolation of distributed load
@@ -184,7 +185,7 @@ class PhysMember(Member3D):
                         w2 = w(xj)
 
                     # Add the load to the sub-member
-                    new_sub_member.DistLoads.append([direction, w1, w2, x1, x2, case, self_weight])
+                    new_sub_member.DistLoads.append([direction, w1, w2, x1, x2, case, self_weight, load_height])
 
             # Add point loads to the sub-member
             for pt_load in self.PtLoads:
@@ -193,6 +194,7 @@ class PhysMember(Member3D):
                 P = pt_load[1]
                 x = pt_load[2]
                 case = pt_load[3]
+                load_height = pt_load[4] if len(pt_load) > 4 else 0.0
 
                 # Determine if the point load should be applied to this segment
                 if x >= xi and x < xj or (isclose(x, xj) and isclose(xj, self.L())):
@@ -200,7 +202,7 @@ class PhysMember(Member3D):
                     x = x - xi
 
                     # Add the load to the sub-member
-                    new_sub_member.PtLoads.append([direction, P, x, case])
+                    new_sub_member.PtLoads.append([direction, P, x, case, load_height])
 
             # Add the new sub-member to the sub-member dictionary for this physical member
             self.sub_members[name] = new_sub_member

@@ -23,6 +23,12 @@ Out-of-plane buckling
    - laterally and torsionally clamped ends, uniform moment: M_cr = (2π/L)·sqrt(E·Iy·G·J)
 7. Equivalent torsion constant approximation of warping: exact for the fork-supported beam in
    uniform bending, M_cr = (π/L)·sqrt(E·Iy·(G·J + π²·E·Iw/L²)).
+7b. Load height: a transverse load applied at a distance z_g from the shear centre adds -|p|·z_g to
+   the twist stiffness. On a member too stiff to bend, the tip load of a cantilever twists it at
+   exactly P_cr = G·J/(L·z_g) and a uniform load at q_cr = (π/2)²·G·J/(L²·z_g); with bending, the
+   cantilever follows Timoshenko & Gere's first-order correction (1 - a·sqrt(EI/GJ)/L) for small
+   a, and the fork-supported beam with a central point load follows the EN 1993-1-1 Annex F
+   three-factor formula to within its own accuracy.
 8. Consistency: a beam whose second half is rotated 90° about its axis (with Iy and Iz swapped)
    gives the same critical load as the unrotated beam. This exercises the My terms and the
    local-to-global transformation of the moment terms.
@@ -109,7 +115,7 @@ def _uniform_moment_beam(support_i=FORK_I, support_j=FORK_J, **kwargs):
     return model
 
 
-def _portal_frame(brace_eaves=False, w=-10e3):
+def _portal_frame(brace_eaves=False, w=-10e3, z_g=0.0):
     """A 5 m x 3 m IPE200 portal frame in the XY plane with fixed bases, strong axis in-plane."""
     model = FEModel3D()
     model.add_material('Steel', E_STEEL, G_STEEL, 0.3, 0.0)
@@ -133,7 +139,7 @@ def _portal_frame(brace_eaves=False, w=-10e3):
         model.def_support('B', False, False, True, True, False, False)
         model.def_support('C', False, False, True, True, False, False)
 
-    model.add_member_dist_load('Beam', 'FY', w, w)
+    model.add_member_dist_load('Beam', 'FY', w, w, load_height=z_g)
 
     return model
 
@@ -498,6 +504,155 @@ def test_equivalent_torsion_requires_warping_constant():
 
     with pytest.raises(ValueError, match='Iw'):
         model.analyze_buckling(warping='equivalent_torsion')
+
+
+# ---------------------------------------------------------------------------
+# Test 7b: Load height
+# ---------------------------------------------------------------------------
+def _stiff_cantilever(rotation=0.0):
+    """A cantilever far too stiff in bending to buckle laterally, so that only twist is left."""
+    model = FEModel3D()
+    model.add_material('Mat', 1.0, 1.0, 0.0, 0.0)
+    model.add_section('Sec', 1e3, 1e6, 1e6, 1.0)
+    model.add_node('N0', 0.0, 0.0, 0.0)
+    model.add_node('N1', 1.0, 0.0, 0.0)
+    model.add_member('Beam', 'N0', 'N1', 'Mat', 'Sec', rotation=rotation)
+    model.def_support('N0', True, True, True, True, True, True)
+    return model
+
+
+@pytest.mark.parametrize('rotation, direction', [(0.0, 'FY'), (90.0, 'FY'), (0.0, 'Fy'), (0.0, 'FZ')])
+def test_load_height_point_load_twists_stiff_cantilever(rotation, direction):
+    """
+    A tip load P at height z_g above the shear centre of a torsionally soft but flexurally rigid
+    cantilever has the potential -½·P·z_g·φ² against the strain energy ½·(GJ/L)·φ², so the
+    cantilever twists over at exactly P_cr = G·J/(L·z_g). The twist is linear, so the finite
+    element answer is exact whatever the subdivision. The sign convention of the load height is
+    tied to the load's line of action, so the result must not depend on the member rotation or
+    on whether the load is given in local or global coordinates.
+    """
+    model = _stiff_cantilever(rotation)
+    model.add_member_pt_load('Beam', direction, -1.0, 1.0, load_height=0.25)
+
+    results = model.analyze_buckling(num_modes=1, elements_per_member=8)
+
+    assert results.load_multipliers[0] == pytest.approx(1.0/(1.0*0.25), rel=1e-5)
+
+
+def test_load_height_point_load_along_member_and_stabilising_sign():
+    """A load at mid-length twists only the first half: P_cr = G·J/(x·z_g). A negative load height stabilises."""
+    model = _stiff_cantilever()
+    model.add_member_pt_load('Beam', 'FY', -1.0, 0.5, load_height=0.25)
+    results = model.analyze_buckling(num_modes=1, elements_per_member=8)
+    assert results.load_multipliers[0] == pytest.approx(1.0/(0.5*0.25), rel=1e-5)
+
+    # A load hanging below the shear centre (acting away from it) cannot twist the member over;
+    # the only mode left is the lateral-torsional one of the very stiff section, far higher up
+    model = _stiff_cantilever()
+    model.add_member_pt_load('Beam', 'FY', -1.0, 1.0, load_height=-0.25)
+    results = model.analyze_buckling(num_modes=1, elements_per_member=8)
+    assert results.load_multipliers[0] > 100.0
+
+
+def test_load_height_distributed_load_twists_stiff_cantilever():
+    """
+    A uniform load q at height z_g on the flexurally rigid cantilever: G·J·φ'' + q·z_g·φ = 0 with
+    φ(0) = 0 and φ'(L) = 0 gives q_cr = (π/2)²·G·J/(L²·z_g). Linear twist elements converge from
+    above; 16 elements are within 0.1 %.
+    """
+    model = _stiff_cantilever()
+    model.add_member_dist_load('Beam', 'FY', -1.0, -1.0, load_height=0.25)
+
+    results = model.analyze_buckling(num_modes=1, elements_per_member=16)
+
+    assert results.load_multipliers[0] == pytest.approx((np.pi/2)**2/0.25, rel=0.002)
+
+
+def test_load_height_partial_distributed_load_with_load_factor():
+    """
+    A uniform load over the middle half of the flexurally rigid cantilever, factored by 2 in the
+    load combination, against a fine one-dimensional finite difference solution of
+    G·J·φ'' + 2·q·z_g·φ = 0 on the loaded part.
+    """
+    model = _stiff_cantilever()
+    model.add_member_dist_load('Beam', 'FY', -1.0, -1.0, x1=0.25, x2=0.75, case='D', load_height=0.25)
+    model.add_load_combo('C', {'D': 2.0})
+
+    results = model.analyze_buckling(combo_name='C', num_modes=1, elements_per_member=16)
+
+    # Reference: 2000 linear twist elements
+    n = 2000
+    h = 1.0/n
+    K = np.zeros((n + 1, n + 1))
+    Kg = np.zeros((n + 1, n + 1))
+    for e in range(n):
+        K[e:e + 2, e:e + 2] += np.array([[1, -1], [-1, 1]])/h
+        if 0.25 <= (e + 0.5)*h <= 0.75:
+            Kg[e:e + 2, e:e + 2] += -2.0*0.25*h*np.array([[2, 1], [1, 2]])/6
+    mu = np.linalg.eigvals(np.linalg.solve(K[1:, 1:], -Kg[1:, 1:])).real
+    reference = 1.0/mu[mu > 0].max()
+
+    assert results.load_multipliers[0] == pytest.approx(reference, rel=0.005)
+
+
+def test_load_height_cantilever_matches_timoshenko_gere_first_order_correction():
+    """
+    Timoshenko & Gere (eq. 6-30): a tip load applied at height a above the centroid of a
+    cantilever changes the critical load by the factor (1 - a·sqrt(EI/GJ)/L), to first order in
+    a. With EI = GJ = L = 1 and a = ±0.02 the finite element ratio must match to within the
+    second-order terms.
+    """
+    def critical_load(a):
+        model = _beam()
+        model.def_support('N0', True, True, True, True, True, True)
+        model.add_member_pt_load('Beam', 'FY', -1.0, 1.0, load_height=a)
+        return model.analyze_buckling(num_modes=1, elements_per_member=16).load_multipliers[0]
+
+    reference = critical_load(0.0)
+    assert critical_load(0.02)/reference == pytest.approx(0.98, rel=0.003)
+    assert critical_load(-0.02)/reference == pytest.approx(1.02, rel=0.003)
+
+
+@pytest.mark.parametrize('z_g', [0.1, -0.1])
+def test_load_height_matches_annex_f_three_factor_formula(z_g):
+    """
+    Fork-supported beam with a central point load at the top (z_g > 0) or bottom (z_g < 0)
+    flange, against the EN 1993-1-1 Annex F / NCCI SN003 three-factor formula with C1 = 1.365
+    and C2 = 0.553 and Iw = 0. The formula is itself a fit, about 1 % off the exact solution at
+    z_g = 0, so agreement to 5 % is what can be asked.
+    """
+    model = _beam()
+    model.def_support('N0', *FORK_I)
+    model.def_support('N1', *FORK_J)
+    model.add_member_pt_load('Beam', 'FY', -1.0, 0.5, load_height=z_g)
+
+    results = model.analyze_buckling(num_modes=1, elements_per_member=16)
+
+    C1, C2 = 1.365, 0.553
+    M_cr = C1*np.pi**2*(np.sqrt(1.0/np.pi**2 + (C2*z_g)**2) - C2*z_g)   # E·Iy = G·J = L = 1
+    assert results.load_multipliers[0] == pytest.approx(4*M_cr, rel=0.05)
+
+
+def test_load_height_reduces_portal_frame_out_of_plane_factor():
+    """Top flange loading of the portal frame's beam lowers α_cr,op; bottom flange loading raises it."""
+    lam = {z_g: _portal_frame(z_g=z_g).analyze_buckling(num_modes=1, plane='XY', out_of_plane=True)
+           .load_multipliers[0] for z_g in (0.1, 0.0, -0.1)}
+
+    assert lam[0.1] < 0.85*lam[0.0] < lam[0.0] < lam[-0.1]
+
+    # The static analysis does not see the load height
+    with_height = _portal_frame(z_g=0.1)
+    without = _portal_frame()
+    with_height.analyze()
+    without.analyze()
+    assert with_height.members['Beam'].max_moment('My') == pytest.approx(without.members['Beam'].max_moment('My'))
+
+
+def test_load_height_is_rejected_for_moments():
+    """A moment has no point of application to displace, so a load height is an error."""
+    model = _beam()
+    with pytest.raises(ValueError, match='load height'):
+        model.add_member_pt_load('Beam', 'Mz', 1.0, 0.5, load_height=0.1)
 
 
 # ---------------------------------------------------------------------------
