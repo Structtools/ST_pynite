@@ -3,6 +3,7 @@
 from __future__ import annotations  # Allows more recent type hints features
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
+import warnings
 
 import numpy as np
 import scipy as sp
@@ -3400,11 +3401,22 @@ class FEModel3D:
         * Warping stiffness: the 6-DOF element has no warping DOF, so warping is neglected by
           default. This is conservative for I-sections and can be significant for short spans.
           `warping='equivalent_torsion'` replaces the torsion constant of every member by
-          `J + π²·E·Iw/(G·L²)`, with `L` the length of the physical member, in the eigenproblem.
-          This is exact for a member in uniform bending with fork supports at its ends and free
-          warping (k = k_w = 1 over the member length), approximate otherwise, and requires `Iw`
-          on every section. Members whose twist is restrained at interior nodes should be split
-          into separate physical members, otherwise the approximation stays on the safe side.
+          `J + π²·E·Iw/(G·L_w²)` in the eigenproblem, where `L_w` is the member's **warping
+          length**: the distance between the points where its twist is restrained. It defaults
+          to the length of the physical member, which is right only when the twist is held at
+          both member ends (fork supports, or frame corners where another member meets it).
+          Set it with `def_warping_length()` otherwise: `2·L` for a member whose twist is held
+          at one end only (a column standing on a base that holds no twist, each span of a
+          continuous beam at an intermediate support), and a very large value for a member whose
+          twist is held at neither end. **Leaving the default on a member with a twist-free end
+          overstates the warping stiffness and is unconservative**, by 13-24 % on the critical
+          load factor of portal frame columns and 39 % on a two-span beam in the PolyFrame
+          comparison (`Testing/polyframe`); a warning names such members when it can detect
+          them (a support that does not hold the rotation about the member axis, and no other
+          member meeting at the node at an angle). The approximation is exact for a member in
+          uniform bending with fork supports and free warping (k = k_w = 1) and approximate
+          otherwise; it requires `Iw` on every section. A member whose twist is restrained at
+          interior nodes should be split into separate physical members.
         * Load height: member loads act at the shear centre unless a `load_height` is given with
           `add_member_pt_load` or `add_member_dist_load`. Nodal loads always act at the node.
         * Sections are taken as doubly symmetric with the shear centre at the centroid.
@@ -3525,16 +3537,77 @@ class FEModel3D:
 
         return results
 
+    def def_warping_length(self, member_name: str, length: float) -> None:
+        """Defines the warping length of a member for the buckling analysis.
+
+        The warping length is the distance between the points where the member's twist is
+        restrained. `analyze_buckling(warping='equivalent_torsion')` approximates the warping
+        stiffness by the equivalent torsion constant `J + π²·E·Iw/(G·L_w²)`, which is exact for a
+        member in uniform bending between two fork supports a distance `L_w` apart. By default
+        `L_w` is the member length, which is right only when the twist is held at both member
+        ends. Use this method for the other cases:
+
+        * twist held at one end only (a column on a base that does not hold its twist, a span of
+          a continuous beam at an intermediate support): `2·L`;
+        * twist held at neither end: `math.inf` (no warping stiffness is counted);
+        * twist held at interior points: split the member there instead, or give the distance
+          between the restraints.
+
+        Leaving the default on a member with a twist-free end overstates the warping stiffness and
+        is unconservative. The static analysis is unaffected.
+
+        :param member_name: The name of the physical member.
+        :type member_name: str
+        :param length: The warping length, in the model's length units. Must be positive; may be
+                       ``math.inf``.
+        :type length: float
+        :raises NameError: Occurs when the member does not exist.
+        :raises ValueError: Occurs when the length is not positive.
+        """
+        if member_name not in self.members:
+            raise NameError(f"Member '{member_name}' does not exist in the model")
+        if not (length > 0):
+            raise ValueError(f'The warping length must be positive. {length} was given.')
+        self.members[member_name].warping_length = float(length)
+
+    def _twist_held_at(self, member, node) -> bool:
+        """Whether a member's twist can be taken as restrained at one of its end nodes.
+
+        True when the support at the node holds the rotation about the member axis (every global
+        rotation the axis has a component along), or when another physical member meets the node
+        at an angle, so that its bending stiffness holds the twist. Used only to warn when the
+        default warping length is likely wrong; a judgement, not a stiffness.
+        """
+        d = np.array([member.j_node.X - member.i_node.X,
+                      member.j_node.Y - member.i_node.Y,
+                      member.j_node.Z - member.i_node.Z])
+        d = d/np.linalg.norm(d)
+        supports = (node.support_RX, node.support_RY, node.support_RZ)
+        if all(supports[i] for i in range(3) if abs(d[i]) > 1e-6):
+            return True
+        for other in self.members.values():
+            if other is member or node.name not in (other.i_node.name, other.j_node.name):
+                continue
+            e = np.array([other.j_node.X - other.i_node.X,
+                          other.j_node.Y - other.i_node.Y,
+                          other.j_node.Z - other.i_node.Z])
+            e = e/np.linalg.norm(e)
+            if np.linalg.norm(np.cross(d, e)) > 1e-6:
+                return True
+        return False
+
     def _apply_equivalent_torsion_constant(self) -> None:
         """Replaces each member's torsion constant by an equivalent torsion constant that approximates warping stiffness.
 
-        For a member of length `L` in uniform bending with fork supports and free warping at its
-        ends, the lateral-torsional critical moment is `M_cr = (π/L)·sqrt(E·Iz·(G·J + π²·E·Iw/L²))`,
-        which is the no-warping result with `J` replaced by `J_eff = J + π²·E·Iw/(G·L²)`. Applying
-        `J_eff` to every member carries that approximation into a general frame. The length is that
-        of the physical member, which assumes its twist is restrained at its end nodes; a longer
-        length than the real distance between torsional restraints understates the warping
-        contribution, so the approximation stays conservative in that case.
+        For a member in uniform bending with fork supports a distance `L_w` apart and free warping
+        at them, the lateral-torsional critical moment is
+        `M_cr = (π/L_w)·sqrt(E·Iz·(G·J + π²·E·Iw/L_w²))`, which is the no-warping result with `J`
+        replaced by `J_eff = J + π²·E·Iw/(G·L_w²)`. Applying `J_eff` to every member carries that
+        approximation into a general frame. `L_w` is the member's warping length
+        (`def_warping_length`), by default the length of the physical member, which assumes the
+        twist is held at both of its ends. A member whose twist is free at an end warps over a
+        longer length, so the default overstates its warping stiffness and is unconservative; a
+        warning names such members where the end conditions make it evident.
 
         The override is set on the physical members and inherited by their sub-members when the
         model is discretized for analysis. It only affects the elastic stiffness matrix.
@@ -3551,11 +3624,27 @@ class FEModel3D:
                 f"Missing on: {', '.join(dict.fromkeys(missing))}. Pass `Iw=` to `add_section`."
             )
 
+        suspect = []
         for member in self.members.values():
             E = member.material.E
             G = member.material.G
-            L = member.L()
-            member._J_eff = member.section.J + np.pi**2*E*member.section.Iw/(G*L**2)
+            L_w = member.warping_length if member.warping_length is not None else member.L()
+            if member.warping_length is None and member.section.Iw > 0:
+                if not (self._twist_held_at(member, member.i_node)
+                        and self._twist_held_at(member, member.j_node)):
+                    suspect.append(member.name)
+            member._J_eff = member.section.J + np.pi**2*E*member.section.Iw/(G*L_w**2)
+
+        if suspect:
+            warnings.warn(
+                "warping='equivalent_torsion' uses the member length as the warping length of "
+                f"{', '.join(suspect)}, but the twist of these members is not held at both ends "
+                "by a support or another member. That overstates their warping stiffness and is "
+                "unconservative. Set the distance between their twist restraints with "
+                "`def_warping_length()` (2*L for a member held at one end only, math.inf for "
+                "none).",
+                UserWarning, stacklevel=3,
+            )
 
     def _adopt_buckling_results(self, model: FEModel3D, results) -> None:
         """Copies buckling results from the subdivided analysis copy back onto this model.

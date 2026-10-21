@@ -102,6 +102,7 @@ class Member3D:
         self.beam_type: str = beam_type  # 'timoshenko' or 'bernoulli'
         self._force_timoshenko: bool = False  # Internal flag: overrides beam_type for eigenvalue analysis
         self._J_eff: float | None = None  # Internal override of the torsion constant (equivalent torsion constant for warping in buckling analysis)
+        self.warping_length: float | None = None  # Distance between the member's twist restraints, used by the buckling analysis for the equivalent torsion constant. `None` means the member length. Set with `FEModel3D.def_warping_length`.
 
         # Members need to track whether they are active or not for any given load combination. They may become inactive for a load combination during a tension/compression-only analysis. This dictionary will be used when the model is solved.
         self.active: dict[str, bool] = {}  # Key = load combo name, Value = True or False
