@@ -14,7 +14,8 @@ class Section():
 
     This class stores all properties related to the geometry of the member
     """
-    def __init__(self, model: 'FEModel3D', name: str, A: float, Iy: float, Iz: float, J: float, Asy: float, Asz: float) -> None:
+    def __init__(self, model: 'FEModel3D', name: str, A: float, Iy: float, Iz: float, J: float, Asy: float, Asz: float,
+                 Iw: float | None = None) -> None:
         """
         :param model: The finite element model to which this section belongs
         :type model: FEModel3D
@@ -32,6 +33,10 @@ class Section():
         :type Asy: float
         :param Asz: Shear area for shear in the local z-direction (bending about y).
         :type Asz: float
+        :param Iw: The warping constant of the section. Optional. Only used by the buckling analysis
+                   when the equivalent torsion constant approximation of warping is requested, and
+                   by `EurocodeHelpers.get_critical_moment`.
+        :type Iw: float, optional
         """        
         self.model: 'FEModel3D' = model
         self.name: str = name
@@ -41,6 +46,7 @@ class Section():
         self.J: float = J
         self.Asy: float = Asy
         self.Asz: float = Asz
+        self.Iw: float | None = Iw
     
     def __repr__(self) -> str:
         return f"Section(name={self.name!r}, A={self.A}, Iy={self.Iy}, Iz={self.Iz}, J={self.J})"
@@ -90,7 +96,8 @@ class Section():
 class SteelSection(Section):
 
     def __init__(self, model: 'FEModel3D', name: str, A: float, Iy: float, Iz: float, J: float, 
-                 Zy: float, Zz: float, material_name: str, Asy: float = 0.0, Asz: float = 0.0) -> None:
+                 Zy: float, Zz: float, material_name: str, Asy: float = 0.0, Asz: float = 0.0,
+                 Iw: float | None = None) -> None:
         """
         Initialize a steel section
 
@@ -119,7 +126,7 @@ class SteelSection(Section):
         """
 
         # Basic section properties
-        super().__init__(model, name, A, Iy, Iz, J, Asy, Asz)
+        super().__init__(model, name, A, Iy, Iz, J, Asy, Asz, Iw)
 
         # Additional section properties for steel
         self.ry: float = (Iy/A)**0.5

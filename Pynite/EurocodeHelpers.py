@@ -11,9 +11,11 @@ get_critical_moment
     Compute M_cr for lateral-torsional buckling using the 3-factor formula
     from EN 1993-1-1 Annex F (NCCI SN003).
 
-    Note: PyNite uses 6-DOF beam elements (no warping DOF).  M_cr cannot be
-    extracted directly from a 6-DOF eigenvalue, so the closed-form C1 formula
-    is used instead.  Supply the warping constant I_w via ``section.Iw``.
+    Note: PyNite uses 6-DOF beam elements (no warping DOF). The buckling
+    analysis (``FEModel3D.analyze_buckling``) finds lateral-torsional modes
+    without warping, or with warping approximated by an equivalent torsion
+    constant; this closed-form C1 formula is the complement for a member
+    check. Supply the warping constant I_w via ``add_section(..., Iw=...)``.
 """
 
 from __future__ import annotations
@@ -75,8 +77,8 @@ def get_critical_moment(model: FEModel3D, member_name: str,
         M_cr = C1 · (π²EIz)/(kL)² · sqrt( Iw/Iz + (kL)²·G·It/(π²EIz) )
 
     This is the closed-form approach for 6-DOF FEM models that do **not**
-    include warping (7th) DOFs.  The warping constant Iw must be supplied by
-    setting ``section.Iw`` on the section object before calling this function.
+    include warping (7th) DOFs.  The warping constant Iw must be supplied on
+    the section (``add_section(..., Iw=...)``) before calling this function.
 
     Parameters
     ----------
@@ -142,8 +144,8 @@ def get_critical_moment(model: FEModel3D, member_name: str,
     Iw = getattr(sub.section, 'Iw', None)
     if Iw is None:
         raise AttributeError(
-            f"Section for member '{member_name}' has no 'Iw' (warping constant) "
-            "attribute.  Set ``section.Iw = <value>`` before calling "
+            f"Section for member '{member_name}' has no 'Iw' (warping constant). "
+            "Pass ``Iw=<value>`` to ``add_section`` before calling "
             "get_critical_moment()."
         )
 
