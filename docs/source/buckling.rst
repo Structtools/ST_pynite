@@ -156,12 +156,23 @@ Warping
 
       J_{eff} = J + \frac{\pi^2 E I_w}{G L^2}
 
-   with :math:`L` the length of the physical member. This is exact for a member in uniform
-   bending with fork supports and free warping at its ends (:math:`k = k_w = 1` over the member
-   length) and approximate otherwise. It requires ``Iw`` on every section (``add_section(...,
-   Iw=...)``). A member whose twist is restrained at interior nodes should be split into separate
-   physical members; otherwise the longer length understates the warping contribution and the
-   approximation stays on the safe side.
+   with :math:`L` the member's **warping length**: the distance between the points where its
+   twist is restrained. This is exact for a member in uniform bending with fork supports and free
+   warping at its ends (:math:`k = k_w = 1`) and approximate otherwise. It requires ``Iw`` on
+   every section (``add_section(..., Iw=...)``).
+
+   The warping length defaults to the length of the physical member, which is right only when
+   the twist is held at both member ends (fork supports, or a frame corner where another member
+   meets it). Set it with ``def_warping_length(member, length)`` otherwise: :math:`2L` for a
+   member whose twist is held at one end only (a column standing on a base that does not hold
+   its twist, each span of a continuous beam at an intermediate support), ``math.inf`` for a
+   member held at neither end. **Leaving the default on a member with a twist-free end overstates
+   the warping stiffness and is unconservative**: in the PolyFrame comparison
+   (``Testing/polyframe``) it put the out-of-plane critical load factor of portal frame columns
+   13 to 24 % too high and that of a two-span beam 39 % too high. The analysis warns when a
+   member on the default has an end where neither the support nor another member holds the twist.
+   A member whose twist is restrained at interior nodes should be split into separate physical
+   members.
 
    Without warping, the torsional buckling load of a column is :math:`G J A / I_p` for every
    twist mode regardless of its length, so a column braced closely about its weak axis may show

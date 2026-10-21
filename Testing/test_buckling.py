@@ -39,6 +39,8 @@ Out-of-plane buckling
 Units: the beam tests are non-dimensional (E = G = 1, L = 1). The frame tests use N and m.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 from Pynite import FEModel3D
@@ -504,6 +506,89 @@ def test_equivalent_torsion_requires_warping_constant():
 
     with pytest.raises(ValueError, match='Iw'):
         model.analyze_buckling(warping='equivalent_torsion')
+
+
+def test_fork_supported_beam_does_not_warn_about_warping_length():
+    """Twist held at both ends: the member length is the warping length, no warning."""
+    model = _uniform_moment_beam(Iw=0.5)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        model.analyze_buckling(num_modes=1, warping='equivalent_torsion')
+
+
+def _twist_free_top_column(Iw=1.0):
+    """
+    A column along Y whose twist is held at the base only. Both ends are held laterally, so
+    the weak-axis Euler load (π²·E·I/L² = 98.7) is far above the torsional buckling load, and the
+    first mode is torsional. Nondimensional: E = G = 1, L = 1, A = 1, Iy = Iz = 10, J = 1.
+    """
+    model = FEModel3D()
+    model.add_material('Mat', 1.0, 1.0, 0.0, 0.0)
+    model.add_section('Sec', 1.0, 10.0, 10.0, 1.0, Iw=Iw)
+    model.add_node('N0', 0.0, 0.0, 0.0)
+    model.add_node('N1', 0.0, 1.0, 0.0)
+    model.add_member('Column', 'N0', 'N1', 'Mat', 'Sec')
+    # Base: translations and the twist (RY) held, bending rotations free.
+    model.def_support('N0', True, True, True, False, True, False)
+    # Top: held laterally, free axially, free to rotate and to twist.
+    model.def_support('N1', True, False, True, False, False, False)
+    model.add_node_load('N1', 'FY', -1.0)
+    return model
+
+
+def test_torsional_buckling_with_twist_free_end_needs_warping_length_2L():
+    """
+    Torsional buckling of a column whose twist is held at one end only (Timoshenko & Gere):
+    N_cr,T = (G·J + π²·E·Iw/L_T²)·A/I_p with L_T = 2·L. With the warping length set to 2·L the
+    equivalent torsion constant reproduces it; left at the member length it overstates the
+    warping stiffness and gives a critical load 3.1 times too high, and the analysis warns.
+    """
+    Ip = 10.0 + 10.0
+    N_cr_T = (1.0 + np.pi**2*1.0/(2.0)**2)/Ip
+    N_wrong = (1.0 + np.pi**2*1.0/(1.0)**2)/Ip
+
+    # The default (member length) is unconservative here and must say so
+    model = _twist_free_top_column()
+    with pytest.warns(UserWarning, match='warping length'):
+        results = model.analyze_buckling(num_modes=1, elements_per_member=8,
+                                         warping='equivalent_torsion')
+    assert results.load_multipliers[0] == pytest.approx(N_wrong, rel=0.01)
+    assert results.load_multipliers[0] > 3.0*N_cr_T
+
+    # With the twist-restraint spacing declared, the closed form is reproduced and nothing warns
+    model = _twist_free_top_column()
+    model.def_warping_length('Column', 2.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        results = model.analyze_buckling(num_modes=1, elements_per_member=8,
+                                         warping='equivalent_torsion')
+    assert results.load_multipliers[0] == pytest.approx(N_cr_T, rel=0.01)
+
+    # Twist held at neither end: no warping stiffness is counted
+    model = _twist_free_top_column()
+    model.def_support('N0', True, True, True, False, False, False)
+    model.def_support('N1', True, False, True, False, False, False)
+    # ... which is a twist mechanism, so hold the twist at an interior node instead
+    model.add_node('Nm', 0.0, 0.5, 0.0)
+    model.def_support('Nm', False, False, False, False, True, False)
+    model.def_warping_length('Column', float('inf'))
+    results = model.analyze_buckling(num_modes=1, elements_per_member=8,
+                                     warping='equivalent_torsion')
+    assert results.load_multipliers[0] == pytest.approx(1.0/Ip, rel=0.01)
+
+
+def test_def_warping_length_validates_its_arguments():
+    model = _twist_free_top_column()
+    with pytest.raises(NameError):
+        model.def_warping_length('NoSuchMember', 2.0)
+    with pytest.raises(ValueError):
+        model.def_warping_length('Column', 0.0)
+    with pytest.raises(ValueError):
+        model.def_warping_length('Column', -1.0)
+    with pytest.raises(ValueError):
+        model.def_warping_length('Column', float('nan'))
+    model.def_warping_length('Column', float('inf'))
+    assert model.members['Column'].warping_length == float('inf')
 
 
 # ---------------------------------------------------------------------------
