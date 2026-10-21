@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
-from numpy.linalg import solve
 import scipy as sp
 from copy import deepcopy
 
@@ -25,13 +24,12 @@ from Pynite.ModalResults import (ModalDiagnostics, ModalModelError, ModalResults
                                  ModalSolverError, fix_mode_shape_signs)
 
 if TYPE_CHECKING:
-    from typing import Dict, List, Tuple
     from numpy import float64
     from numpy.typing import NDArray
 
 
 # %%
-class FEModel3D():
+class FEModel3D:
     """A 3D finite element model object. This object has methods and dictionaries to create, store,
        and retrieve results from a finite element model.
     """
@@ -44,19 +42,19 @@ class FEModel3D():
         # the data types they store, and then those types will be removed. This will give us the
         # ability to get type-based hints when using the dictionaries.
 
-        self.nodes: Dict[str, Node3D] = {}             # A dictionary of the model's nodes
-        self.materials: Dict[str, Material] = {}       # A dictionary of the model's materials
-        self.sections: Dict[str, Section] = {}         # A dictonary of the model's cross-sections
-        self.springs: Dict[str, Spring3D] = {}         # A dictionary of the model's springs
-        self.members: Dict[str, PhysMember] = {}       # A dictionary of the model's physical members
-        self.quads: Dict[str, Quad3D] = {}             # A dictionary of the model's quadiralterals
-        self.plates: Dict[str, Plate3D] = {}           # A dictionary of the model's rectangular plates
-        self.meshes: Dict[str, Mesh] = {}              # A dictionary of the model's meshes
-        self.shear_walls: Dict[str, ShearWall] = {}    # A dictionary of the model's shear walls
-        self.mats: Dict[str, MatFoundation] = {}       # A dictionary of the model's mat foundations
-        self.load_combos: Dict[str, LoadCombo] = {}    # A dictionary of the model's load combinations
-        self._D: Dict[str, NDArray[float64]] = {}      # A dictionary of the model's nodal displacements by load combination
-        self._pushover_traces: Dict[str, Dict[str, List]] = {}
+        self.nodes: dict[str, Node3D] = {}             # A dictionary of the model's nodes
+        self.materials: dict[str, Material] = {}       # A dictionary of the model's materials
+        self.sections: dict[str, Section] = {}         # A dictonary of the model's cross-sections
+        self.springs: dict[str, Spring3D] = {}         # A dictionary of the model's springs
+        self.members: dict[str, PhysMember] = {}       # A dictionary of the model's physical members
+        self.quads: dict[str, Quad3D] = {}             # A dictionary of the model's quadiralterals
+        self.plates: dict[str, Plate3D] = {}           # A dictionary of the model's rectangular plates
+        self.meshes: dict[str, Mesh] = {}              # A dictionary of the model's meshes
+        self.shear_walls: dict[str, ShearWall] = {}    # A dictionary of the model's shear walls
+        self.mats: dict[str, MatFoundation] = {}       # A dictionary of the model's mat foundations
+        self.load_combos: dict[str, LoadCombo] = {}    # A dictionary of the model's load combinations
+        self._D: dict[str, NDArray[float64]] = {}      # A dictionary of the model's nodal displacements by load combination
+        self._pushover_traces: dict[str, dict[str, list]] = {}
 
         self.solution: str | None = None  # Indicates the solution type for the latest run of the model
         self._buckling_results = None  # Results of the latest buckling analysis (see `analyze_buckling`)
@@ -171,12 +169,12 @@ class FEModel3D():
         global_matrix[np.ix_(dofs, dofs)] += block
 
     @property
-    def load_cases(self) -> List[str]:
+    def load_cases(self) -> list[str]:
         """Returns a list of all the load cases in the model (in alphabetical order).
         """
 
         # Create an empty list of load cases
-        cases: List[str] = []
+        cases: list[str] = []
 
         # Step through each node
         for node in self.nodes.values():
@@ -918,7 +916,7 @@ class FEModel3D():
         # Return the mesh's name
         return name
 
-    def add_shear_wall(self, name: str, mesh_size: float, length: float, height: float, thickness: float, material_name: str, ky_mod: float = 0.35, plane: Literal['XY', 'YZ'] = 'XY', origin: List[float] = [0, 0, 0]):
+    def add_shear_wall(self, name: str, mesh_size: float, length: float, height: float, thickness: float, material_name: str, ky_mod: float = 0.35, plane: Literal['XY', 'YZ'] = 'XY', origin: list[float] = [0, 0, 0]):
         """Adds a meshed shear wall helper to the model.
 
         The shear wall utility generates a regular mesh for a rectangular wall panel and
@@ -1529,6 +1527,11 @@ class FEModel3D():
             end = self.members[member_name].L()
         else:
             end = x2
+
+        # Validate that the load has a strictly positive length. A zero-length
+        # distributed load divides by zero during member segmentation.
+        if end <= start:
+            raise ValueError(f"x2 must be greater than x1. x1={start}, x2={end} was given.")
 
         # Add the distributed load to the member
         try:
@@ -2506,7 +2509,7 @@ class FEModel3D():
 
         # Import `scipy` features if the sparse solver is being used
         if sparse == True:
-            from scipy.sparse.linalg import spsolve
+            from scipy.sparse.linalg import spsolve  # noqa: F401
 
         # Prepare the model for analysis
         Analysis._prepare_model(self)
@@ -2517,8 +2520,8 @@ class FEModel3D():
         # Get the auxiliary list used to determine how the matrices will be partitioned
         D1_indices, D2_indices, D2 = Analysis._partition_D(self)
 
-        # Calculate the incremental enforced displacement vector
-        Delta_D2 = D2/num_steps
+        # Retain the incremental enforced displacement vector for future use.
+        Delta_D2 = D2/num_steps  # noqa: F841
 
         # Step through each load combination
         for combo in combo_list:
@@ -2572,7 +2575,7 @@ class FEModel3D():
 
         # Import `scipy` features if the sparse solver is being used
         if sparse == True:
-            from scipy.sparse.linalg import spsolve
+            from scipy.sparse.linalg import spsolve  # noqa: F401
 
         # Prepare the model for analysis
         Analysis._prepare_model(self)
@@ -2863,7 +2866,7 @@ class FEModel3D():
         return model
 
     @staticmethod
-    def _position_key(X: float, Y: float, Z: float) -> Tuple[float, float, float]:
+    def _position_key(X: float, Y: float, Z: float) -> tuple[float, float, float]:
         """Returns a hashable key identifying a point, for spotting nodes that share a position.
 
         This recognizes points that coincide exactly, which is the case that matters here:
@@ -2877,7 +2880,7 @@ class FEModel3D():
         :param Z: The point's global Z coordinate.
         :type Z: float
         :return: A key that coincident points share
-        :rtype: Tuple[float, float, float]
+        :rtype: tuple[float, float, float]
         """
 
         return (X, Y, Z)
@@ -3263,12 +3266,12 @@ class FEModel3D():
 
         return False
 
-    def _dof_map(self, D1_indices) -> List[Tuple[str, str]]:
+    def _dof_map(self, D1_indices) -> list[tuple[str, str]]:
         """Returns the `(node_name, dof)` pair for each free DOF, in solver order.
 
         :param D1_indices: The global DOF index of each free DOF.
         :return: The node name and degree of freedom each free DOF belongs to
-        :rtype: List[Tuple[str, str]]
+        :rtype: list[tuple[str, str]]
         """
 
         # Index the nodes by their internal ID so the lookup below stays linear
@@ -3277,19 +3280,19 @@ class FEModel3D():
 
         return [(by_id[dof//6], dof_names[dof % 6]) for dof in D1_indices]
 
-    def _dof_coordinates(self, D1_indices) -> List[Tuple[float, float, float, int]]:
+    def _dof_coordinates(self, D1_indices) -> list[tuple[float, float, float, int]]:
         """Returns the `(X, Y, Z, dof)` key of each free DOF, for numbering-independent ordering.
 
         :param D1_indices: The global DOF index of each free DOF.
         :return: The position and degree of freedom of each free DOF
-        :rtype: List[Tuple[float, float, float, int]]
+        :rtype: list[tuple[float, float, float, int]]
         """
 
         by_id = {node.ID: node for node in self.nodes.values()}
 
         return [(by_id[dof//6].X, by_id[dof//6].Y, by_id[dof//6].Z, dof % 6) for dof in D1_indices]
 
-    def _total_mass(self, M_global, free_dofs=None) -> Dict[str, float]:
+    def _total_mass(self, M_global, free_dofs=None) -> dict[str, float]:
         """Returns the assembled mass in each global direction.
 
         A mass matrix's diagonal does not sum to the total mass once the formulation is consistent,
@@ -3304,7 +3307,7 @@ class FEModel3D():
         :param free_dofs: Restrict the sum to these DOFs. Pass the free-DOF indices for the
                           participating mass, or `None` for the total.
         :return: The mass, keyed by direction
-        :rtype: Dict[str, float]
+        :rtype: dict[str, float]
         """
 
         totals = {}
@@ -3328,7 +3331,7 @@ class FEModel3D():
 
         return totals
 
-    def _mass_per_node(self, M_global) -> Dict[str, float]:
+    def _mass_per_node(self, M_global) -> dict[str, float]:
         """Returns each node's share of the total mass.
 
         This is the node's row sum over the translational mass block rather than its diagonal term,
@@ -3337,7 +3340,7 @@ class FEModel3D():
 
         :param M_global: The assembled global mass matrix.
         :return: Each node's mass, keyed by node name
-        :rtype: Dict[str, float]
+        :rtype: dict[str, float]
         """
 
         # Unit rigid-body translation in Y, whose row sums distribute the total mass over the nodes
@@ -3835,7 +3838,7 @@ class FEModel3D():
             # Define the pushover load step and initialize the pushover load factor
             load_step = list(self.load_combos[push_combo].factors.values())[0]
             step_num = 1
-            load_factor = load_step*step_num
+            load_factor = 0.0
 
             # Get the partitioned global fixed end reaction vector for one pushover increment.
             # The pushover combo factor already defines the increment size.
@@ -3864,17 +3867,30 @@ class FEModel3D():
             }
 
             # Apply the pushover load in steps, summing deformations as we go, until the full pushover load has been analyzed
-            while round(load_factor, 8) <= 1.0:
+            while round(load_factor, 8) < 1.0:
 
                 # Inform the user which pushover load step we're on
                 if log:
                     print('- Beginning pushover load step #' + str(step_num))
                     print(f'- Load_factor = {load_factor}')
 
-                # Run the next pushover load step
-                # Note: The validity of the pushover step is checked and handled within the _pushover_step method
-                Analysis._pushover_step(self, combo.name, push_combo, step_num, P1_push, FER1_push, FER2_push, D1_indices, D2_indices, D2, log, sparse, check_stability, tol, P_Delta, max_iter)
+                cumulative_fraction = 0.0
+                while True:
 
+                    # Run the next pushover load step
+                    # Note: The validity of the pushover step is checked and handled within the _pushover_step method
+                    accepted_fraction = Analysis._pushover_step(self, combo.name, push_combo, step_num, (1-cumulative_fraction)*P1_push, (1-cumulative_fraction)*FER1_push, (1-cumulative_fraction)*FER2_push, D1_indices, D2_indices, D2, log, sparse, check_stability, tol, P_Delta, max_iter)
+
+                    # Determine how much of the load step has been applied so far
+                    cumulative_fraction += (1-cumulative_fraction)*accepted_fraction
+
+                    # Loop until a full load increment has been successfully applied
+                    if round(cumulative_fraction, 4) == 1.0:
+                        break
+
+                # Increment the load factor for the next pushover step
+                load_factor += load_step
+                
                 control_displacement = None
                 if control_node is not None:
                     node = self.nodes[control_node]
@@ -3910,9 +3926,8 @@ class FEModel3D():
 
                     break
 
-                # Move on to the next load step
+                # Move on to the next accepted pushover increment.
                 step_num += 1
-                load_factor += load_step
 
             if self._pushover_state[combo.name]['status'] == 'running':
                 self._pushover_state[combo.name].update({
