@@ -39,7 +39,8 @@ Out-of-plane buckling
    local-to-global transformation of the moment terms.
 9. Planar frame: the 3D modes are the union of the in-plane and out-of-plane modes, and for an
    unbraced IPE200 portal frame lateral-torsional buckling governs by a wide margin. The
-   axial-force-only matrix misses it.
+   axial-force-only matrix misses it. The same frame in XZ with Z up gives the same factors as
+   in XY with Y up.
 
 Units: the beam tests are non-dimensional (E = G = 1, L = 1). The frame tests use N and m.
 """
@@ -972,6 +973,71 @@ def test_portal_frame_modes_are_union_of_in_plane_and_out_of_plane_modes():
     assert results_out.classify_modes() == ['out-of-plane']*6
     assert results_in.plane == 'XY' and not results_in.out_of_plane
     assert results_out.plane == 'XY' and results_out.out_of_plane
+
+
+def _portal_frame_in_plane(plane, hold_base_twist=True):
+    """The portal frame of `_portal_frame` (braced eaves, top flange load) built in XY with Y up or in XZ with Z up."""
+    up, oop = ('Y', 'Z') if plane == 'XY' else ('Z', 'Y')
+
+    def point(x, v):
+        return (x, v, 0.0) if plane == 'XY' else (x, 0.0, v)
+
+    model = FEModel3D()
+    model.add_material('Steel', E_STEEL, G_STEEL, 0.3, 0.0)
+    model.add_section('IPE200', **IPE200)
+    for name, x, v in (('A', 0.0, 0.0), ('B', 0.0, 3.0), ('C', 5.0, 3.0), ('D', 5.0, 0.0)):
+        model.add_node(name, *point(x, v))
+
+    # In XZ the local y-axis of every member is horizontal and out of plane, so the Eurocode strong
+    # axis (Iy) bends in the plane without a rotation; in XY it takes rotation=90
+    rotation = 90 if plane == 'XY' else 0
+    model.add_member('Col1', 'A', 'B', 'Steel', 'IPE200', rotation=rotation)
+    model.add_member('Beam', 'B', 'C', 'Steel', 'IPE200', rotation=rotation)
+    model.add_member('Col2', 'D', 'C', 'Steel', 'IPE200', rotation=rotation)
+
+    dofs = ('DX', 'DY', 'DZ', 'RX', 'RY', 'RZ')
+    base = {'DX', 'DY', 'DZ', 'R' + oop} | ({'R' + up} if hold_base_twist else set())
+    for name in ('A', 'D'):
+        model.def_support(name, *[dof in base for dof in dofs])
+    for name in ('B', 'C'):
+        model.def_support(name, *[dof == 'D' + oop for dof in dofs])
+
+    model.add_member_dist_load('Beam', 'F' + up, -10e3, -10e3, load_height=0.1)
+    model.add_node_load('B', 'FX', 2e3)
+    return model
+
+
+def test_frame_in_xz_plane_matches_frame_in_xy_plane():
+    """
+    A frame in the XZ plane with Z up, as the structuraltools backend builds it, gives the same
+    in-plane and out-of-plane critical load factors as the same frame in XY with Y up, its
+    eigenproblems hold only the in-plane (DX, DZ, RY) and out-of-plane (DY, RX, RZ) DOFs, columns
+    are in compression, and a twist-free base on the default warping length warns about warping.
+    """
+    def run(plane, **kwargs):
+        model = _portal_frame_in_plane(plane)
+        return model, model.analyze_buckling(num_modes=3, plane=plane, **kwargs)
+
+    model_xz, in_xz = run('XZ')
+    _, in_xy = run('XY')
+    _, out_xz = run('XZ', out_of_plane=True, warping='equivalent_torsion')
+    _, out_xy = run('XY', out_of_plane=True, warping='equivalent_torsion')
+
+    np.testing.assert_allclose(in_xz.load_multipliers, in_xy.load_multipliers, rtol=1e-6)
+    np.testing.assert_allclose(out_xz.load_multipliers, out_xy.load_multipliers, rtol=1e-6)
+    assert in_xz.mode_count == out_xz.mode_count == 3
+
+    assert {dof for _, dof in in_xz.dof_map} == {'DX', 'DZ', 'RY'}
+    assert {dof for _, dof in out_xz.dof_map} == {'DY', 'RX', 'RZ'}
+    assert in_xz.mode_shapes.shape == (len(in_xz.dof_map), 3)
+
+    # Compression positive, on the analysis copy and on the caller's model
+    assert in_xz.analysis_model.members['Col1'].axial(0.0, 'Combo 1') > 0.0
+    assert model_xz.members['Col1'].axial(0.0, 'Combo 1') > 0.0
+
+    model = _portal_frame_in_plane('XZ', hold_base_twist=False)
+    with pytest.warns(UserWarning, match='warping'):
+        model.analyze_buckling(num_modes=1, plane='XZ', out_of_plane=True, warping='equivalent_torsion')
 
 
 def test_unbraced_portal_frame_governed_by_lateral_torsional_buckling():

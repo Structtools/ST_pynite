@@ -84,6 +84,10 @@ would otherwise crowd out the in-plane ones.
    the members with ``rotation=90`` so that the strong axis bends in the plane of the frame.
    ``effective_length(..., plane='y')`` then refers to in-plane bending of such a member.
 
+   In an XZ frame with Z up, the local y-axis of every member is horizontal and normal to the
+   frame, so ``Iy`` bends in the plane without a rotation. The out-of-plane DOFs are then DY, RX
+   and RZ.
+
 Member subdivision
 ==================
 
