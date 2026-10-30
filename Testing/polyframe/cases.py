@@ -35,7 +35,7 @@ its own sign convention. Loads are light enough that the in-plane factor is abov
 report; below 10 it is read from an image by OCR.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
 

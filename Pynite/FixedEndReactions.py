@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-def _solve_FER_bending(I1: float, I2: float, L: float, Phi: float, total_load: float, total_moment_about_i: float, Direction: str) -> 'NDArray[float64]':
+def _solve_FER_bending(I1: float, I2: float, L: float, Phi: float, total_load: float, total_moment_about_i: float, Direction: str) -> NDArray[float64]:
     """Solve the 2x2 Timoshenko fixed-end beam system for bending FER.
 
     This solves the compatibility equations for a fixed-fixed Timoshenko beam

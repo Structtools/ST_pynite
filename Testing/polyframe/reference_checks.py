@@ -26,7 +26,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import pynite_side
-from .cases import FrameCase, all_cases, get_case
+from .cases import FrameCase, get_case
 from .corpus import read_record
 from .ltb_reference import MemberLTB, critical_load_factor
 from .sections import SECTIONS, STEEL_E, STEEL_G
