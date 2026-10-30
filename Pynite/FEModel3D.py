@@ -1447,10 +1447,12 @@ class FEModel3D:
                             (destabilising), negative when it acts away from it, e.g. a load hanging
                             from the bottom flange or an uplift load on the top flange
                             (stabilising). This is the `z_g` convention of EN 1993-1-1 Annex F.
-                            Only used by the buckling analysis, where it adds the second-order
-                            work of the load to the geometric stiffness; the static analysis is
-                            unaffected. Only force loads can have a load height. Defaults to 0.0
-                            (load at the shear centre).
+                            The sign refers to the load as given here; a negative load combination
+                            factor reverses the load and so its effect. Only used by the buckling
+                            analysis, where it adds the second-order work of the load to the
+                            geometric stiffness; the static analysis is unaffected. Only force
+                            loads can have a load height. Defaults to 0.0 (load at the shear
+                            centre).
         :type load_height: float, optional
         :raises ValueError: Occurs when an invalid load direction has been specified, or a load
                             height is given for a moment.
@@ -1506,10 +1508,12 @@ class FEModel3D:
                             load acts towards the shear centre, e.g. a gravity load on the top
                             flange (destabilising), negative when it acts away from it, e.g. an
                             uplift load on the top flange (stabilising). This is the `z_g`
-                            convention of EN 1993-1-1 Annex F. Only used by the buckling analysis;
-                            the static analysis is unaffected. A load that changes sign along the
-                            member should be split into two loads. Defaults to 0.0 (load at the
-                            shear centre).
+                            convention of EN 1993-1-1 Annex F. The sign refers to the load as given
+                            here; a negative load combination factor reverses the load and so its
+                            effect. For a load that changes sign along the member it refers to the
+                            direction of the load's resultant, and the part acting the other way has
+                            the opposite effect. Only used by the buckling analysis; the static
+                            analysis is unaffected. Defaults to 0.0 (load at the shear centre).
         :type load_height: float, optional
         :raises ValueError: Occurs when an invalid load direction has been specified.
         """

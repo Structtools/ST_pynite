@@ -166,9 +166,15 @@ class PhysMember(Member3D):
                     self_weight = dist_load[6]
                     load_height = dist_load[7] if len(dist_load) > 7 else 0.0
 
+                    # The load height refers to the direction of the whole load's resultant, which
+                    # the piece of a load that changes sign on this segment need not share
+                    resultant = w1 + w2 if w1 + w2 != 0.0 else w2
+                    load_sign = 1.0 if resultant >= 0.0 else -1.0
+
                     # Equation describing the load as a function of x
-                    # Linear interpolation of distributed load
-                    w = lambda x: (w2 - w1)/(x2_load - x1_load)*(x - x1_load) + w1
+                    # Linear interpolation of distributed load. The end values are bound now, as
+                    # `w1` and `w2` are reassigned below.
+                    w = lambda x, w1=w1, w2=w2: (w2 - w1)/(x2_load - x1_load)*(x - x1_load) + w1
 
                     # Chop up the distributed load for the sub-member
                     if x1_load > xi:
@@ -184,7 +190,7 @@ class PhysMember(Member3D):
                         w2 = w(xj)
 
                     # Add the load to the sub-member
-                    new_sub_member.DistLoads.append([direction, w1, w2, x1, x2, case, self_weight, load_height])
+                    new_sub_member.DistLoads.append([direction, w1, w2, x1, x2, case, self_weight, load_height, load_sign])
 
             # Add point loads to the sub-member
             for pt_load in self.PtLoads:

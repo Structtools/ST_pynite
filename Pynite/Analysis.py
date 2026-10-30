@@ -86,6 +86,10 @@ class BucklingResults:
     # Degrees of freedom that carry out-of-plane motion for each analysis plane
     _OUT_OF_PLANE_DOFS = {'XY': (2, 3, 4), 'XZ': (1, 3, 5), 'YZ': (0, 4, 5)}
 
+    # Local member end DOFs of the bending about each local axis: the transverse displacement and
+    # the bending rotation at both ends
+    _BENDING_DOFS = {'y': [2, 4, 8, 10], 'z': [1, 5, 7, 11]}
+
     @property
     def critical_load_factors(self) -> np.ndarray:
         """Alias for `load_multipliers` (EN 1993-1-1 terminology: α_cr)."""
@@ -101,50 +105,125 @@ class BucklingResults:
         """Whether fewer modes were found than were requested."""
         return self.mode_count < self.requested_modes
 
-    def effective_length(self, member, mode: int = 0, plane: str = 'y') -> float:
+    def effective_length(self, member, mode: int = 0, plane: str = 'y',
+                         x: float | None = None) -> float:
         """Compute the effective (flexural) buckling length L_cr of a member from a buckling mode.
 
-        Uses the Euler formula `L_cr = π · sqrt(EI / N_cr)` with `N_cr = λ · |N_Ed|`, where `N_Ed` is
-        the member's axial force from the first-order pre-solve. This is the usual way of turning a
-        frame's critical load factor into a buckling length for an EN 1993-1-1 clause 6.3.1 check.
-        It is only meaningful for a member that is in compression and that actually takes part in
-        the mode; for a member that stays straight in the mode the value is an upper bound of no
-        practical use, and for a lateral-torsional mode the Euler formula does not apply at all.
+        Uses the Euler formula `L_cr = π · sqrt(EI / N_cr)` with `N_cr = λ · N_Ed`, where `N_Ed` is
+        the member's compressive axial force from the first-order pre-solve. This is the usual way
+        of turning a frame's critical load factor into a buckling length for an EN 1993-1-1 clause
+        6.3.1 check, with the same `N_Ed` in the check. By default `N_Ed` is the largest compression
+        along the member, so the result does not depend on which end is the i-node.
+
+        The length is that of the mode's flexural buckling about the requested axis only when the
+        mode bends the member about that axis. A warning is given when the mode deforms the member
+        but hardly bends it about that axis (an out-of-plane mode asked for an in-plane length, or
+        the other way round). A member that stays straight in the mode gets the length that
+        corresponds to the mode's λ, which is longer than its own buckling length and so on the safe
+        side. For a lateral-torsional mode the Euler formula does not apply.
 
         Parameters
         ----------
         member : str or PhysMember
-            Member name or object.
+            Member name or object. An object is looked up by its name on `analysis_model`, so a
+            member of the caller's model may be passed too.
         mode : int
             Buckling mode index (0 = lowest/critical). Default 0.
         plane : str
             ``'y'`` for bending about the local y-axis (uses Iy),
-            ``'z'`` for bending about the local z-axis (uses Iz). Default ``'y'``.
+            ``'z'`` for bending about the local z-axis (uses Iz). Default ``'y'``. Which one bends in
+            the plane of a planar frame depends on the member's rotation (see the docs).
+        x : float, optional
+            Location along the member at which to take `N_Ed`. Defaults to ``None``: the largest
+            compression along the member. Give it for a member that runs through intermediate nodes
+            with different axial forces between them (a column continuous over several storeys) to
+            get the buckling length that goes with the segment containing `x`.
 
         Returns
         -------
         float
             L_cr in the same length units as the model geometry.
-            Returns ``inf`` if the member has no axial force.
+            Returns ``inf`` if the member is not in compression (anywhere along it, or at `x`).
+
+        Raises
+        ------
+        ValueError
+            If `plane` is not ``'y'`` or ``'z'``.
         """
-        if isinstance(member, str):
-            member = self.analysis_model.members[member]
+        plane = plane.lower()
+        if plane not in self._BENDING_DOFS:
+            raise ValueError(f"`plane` must be 'y' or 'z'. '{plane}' was given.")
+
+        # Always use the analysis copy: it holds the subdivided members and the mode shapes
+        name = member if isinstance(member, str) else member.name
+        member = self.analysis_model.members[name]
 
         lam = self.load_multipliers[mode]
 
-        # Axial force at the i-end from the static pre-solve (positive = compression)
-        N_Ed = member.axial(x=0.0, combo_name=self.combo_name)
-        if abs(N_Ed) < 1e-12:
+        # Axial force from the static pre-solve (positive = compression)
+        if x is None:
+            N_Ed = member.max_axial(self.combo_name)
+        else:
+            N_Ed = member.axial(x, self.combo_name)
+
+        # A member in tension has no flexural buckling length
+        if N_Ed < 1e-12:
             return float('inf')
 
-        N_cr = lam * abs(N_Ed)
+        self._check_bending_axis(member, mode, plane)
+
+        N_cr = lam * N_Ed
 
         # Section properties from the first sub-member
         sub = next(iter(member.sub_members.values()))
         E = sub.material.E
-        I = sub.section.Iy if plane.lower() == 'y' else sub.section.Iz
+        I = sub.section.Iy if plane == 'y' else sub.section.Iz
 
         return np.pi * np.sqrt(E * I / N_cr)
+
+    def _check_bending_axis(self, member, mode: int, plane: str, tol: float = 0.05) -> None:
+        """Warns when a mode deforms a member but hardly bends it about one of its local axes.
+
+        The share is the part of the member's elastic strain energy in the mode that comes from
+        bending about the axis. A member whose strain energy is a negligible part of the mode's total
+        is taken as not taking part in the mode, and gets no warning.
+
+        :param member: The physical member on `analysis_model`.
+        :param mode: The buckling mode index.
+        :param plane: ``'y'`` or ``'z'``, the local bending axis.
+        :param tol: The share of the member's strain energy below which the warning is given.
+                    Defaults to 0.05.
+        """
+
+        combo_name = f'Buckling Mode {mode + 1}'
+        dofs = self._BENDING_DOFS[plane]
+
+        def strain_energy(sub, dofs=None):
+            d = sub.d(combo_name)
+            k = sub.ke()
+            if dofs is not None:
+                d = d[dofs, :]
+                k = k[np.ix_(dofs, dofs)]
+            return 0.5*float((d.T @ k @ d)[0, 0])
+
+        U_mode = sum(strain_energy(sub) for phys_member in self.analysis_model.members.values()
+                     for sub in phys_member.sub_members.values())
+        U_member = sum(strain_energy(sub) for sub in member.sub_members.values())
+
+        if U_mode <= 0.0 or U_member <= 1e-6*U_mode:
+            return
+
+        share = sum(strain_energy(sub, dofs) for sub in member.sub_members.values())/U_member
+
+        if share < tol:
+            warnings.warn(
+                f"Buckling mode {mode + 1} hardly bends member '{member.name}' about its local "
+                f"{plane}-axis ({share:.1%} of its strain energy in the mode). The effective length "
+                f"about that axis from this mode is not a buckling length about it; use a mode in "
+                f"which the member buckles about its {plane}-axis, e.g. from an analysis restricted to "
+                "that plane.",
+                UserWarning, stacklevel=3,
+            )
 
     def out_of_plane_share(self, plane: str | None = None) -> np.ndarray:
         """Returns, for each mode, the share of the mode shape carried by out-of-plane DOFs.
