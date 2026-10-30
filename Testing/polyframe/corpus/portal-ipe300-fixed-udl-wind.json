@@ -1,0 +1,43 @@
+{
+  "case_id": "portal-ipe300-fixed-udl-wind",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 225.1,
+    "alpha_cr_ip_source": "text",
+    "alpha_cr_op": 3.79,
+    "alpha_cr_op_formula_ocr": 3.79,
+    "alpha_cr_op_plot_ocr": [
+      3.79,
+      3.79
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      7.48
+    ],
+    "axial_kn": {
+      "1": -28.676,
+      "2": -10.6699,
+      "3": -31.324
+    },
+    "governing_element_op": 3,
+    "moment_knm": {
+      "1": -18.2221,
+      "2": -26.1663,
+      "3": 26.1663
+    },
+    "uls_utilization": 0.4229970162993982,
+    "util_cross_section": 0.16,
+    "util_stability": 0.42
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "20f4ddca11ec3613c3b0c6952fdac3684af78877108f692a925221780154c410",
+    "ocr": true,
+    "report": "portal-ipe300-fixed-udl-wind.pdf"
+  },
+  "title": "IPE300 portal 6 x 4 m, fixed bases, 10 kN/m on the beam + 5 kN wind"
+}

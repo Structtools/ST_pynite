@@ -18,3 +18,10 @@ gui.py
 wxTableBases.py
 .env
 apps/*
+
+# PolyFrame bridge build output and job files
+Testing/polyframe/bridge/bin/
+Testing/polyframe/bridge/obj/
+
+# PolyFrame reports were captured under a student licence; kept locally, not in git
+Testing/polyframe/corpus/reports/

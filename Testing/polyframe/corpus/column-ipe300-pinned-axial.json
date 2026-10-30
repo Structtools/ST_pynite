@@ -1,0 +1,41 @@
+{
+  "case_id": "column-ipe300-pinned-axial",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 102.9,
+    "alpha_cr_ip_source": "text",
+    "alpha_cr_op": 7.8,
+    "alpha_cr_op_formula_ocr": 7.8,
+    "alpha_cr_op_plot_ocr": [
+      7.8,
+      7.8
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      18.71
+    ],
+    "axial_kn": {
+      "1": -100.0,
+      "2": 0.0
+    },
+    "governing_element_op": 1,
+    "moment_knm": {
+      "1": 0.0,
+      "2": -0.0
+    },
+    "uls_utilization": 0.19745877093297978,
+    "util_cross_section": 0.06,
+    "util_stability": 0.2
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "9113ad169dd229b700cecc5ffa2be916967de3ac879532b58fa1f570ef5ad171",
+    "ocr": true,
+    "report": "column-ipe300-pinned-axial.pdf"
+  },
+  "title": "IPE300 column 4 m, pinned base, roller top, 100 kN axial"
+}

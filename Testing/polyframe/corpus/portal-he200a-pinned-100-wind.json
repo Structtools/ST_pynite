@@ -1,0 +1,44 @@
+{
+  "case_id": "portal-he200a-pinned-100-wind",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 7.65,
+    "alpha_cr_ip_source": "ocr",
+    "alpha_cr_op": 10.42,
+    "alpha_cr_op_formula_ocr": 10.42,
+    "alpha_cr_op_plot_ocr": [
+      10.42,
+      10.42
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      764.63,
+      8.36
+    ],
+    "axial_kn": {
+      "1": -96.6667,
+      "2": -2.4993,
+      "3": -103.3333
+    },
+    "governing_element_op": 3,
+    "moment_knm": {
+      "1": 10.003,
+      "2": 10.003,
+      "3": 9.997
+    },
+    "uls_utilization": 0.23832974662044087,
+    "util_cross_section": 0.18,
+    "util_stability": 0.24
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "4b332d81d275093ce268aafa3e6521cabe74baa19e6e52d8a6c260b7dc570fb9",
+    "ocr": true,
+    "report": "portal-he200a-pinned-100-wind.pdf"
+  },
+  "title": "HE200A portal 6 x 4 m, pinned bases, 100 kN on each column + 5 kN wind"
+}

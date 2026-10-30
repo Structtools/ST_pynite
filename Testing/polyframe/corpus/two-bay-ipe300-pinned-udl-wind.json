@@ -1,0 +1,47 @@
+{
+  "case_id": "two-bay-ipe300-pinned-udl-wind",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 44.3,
+    "alpha_cr_ip_source": "text",
+    "alpha_cr_op": 4.85,
+    "alpha_cr_op_formula_ocr": 4.85,
+    "alpha_cr_op_plot_ocr": [
+      4.85,
+      4.85
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      4.79
+    ],
+    "axial_kn": {
+      "1": -23.2412,
+      "2": -11.1779,
+      "3": -66.851,
+      "4": -6.8534,
+      "5": -29.9079
+    },
+    "governing_element_op": 2,
+    "moment_knm": {
+      "1": -4.7115,
+      "2": -45.2644,
+      "3": 17.2981,
+      "4": -27.9663,
+      "5": 27.4134
+    },
+    "uls_utilization": 0.4170556254522551,
+    "util_cross_section": 0.25,
+    "util_stability": 0.42
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "102740024429190b8bd452e9d91632ecb55c91c1fdd0137fe7ec8b3a75965115",
+    "ocr": true,
+    "report": "two-bay-ipe300-pinned-udl-wind.pdf"
+  },
+  "title": "IPE300 two-bay portal 2 x 6 m, pinned bases, 10 kN/m on both beams + 10 kN wind"
+}
