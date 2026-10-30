@@ -438,12 +438,19 @@ class Member3D:
         is `-½·|p|·z_g·φ²` and it adds `-|p|·z_g` to the stiffness of the twist: destabilising for a
         gravity load on the top flange, stabilising for a load hanging from the bottom flange.
 
+        `z_g` describes the load as it is defined in its load case. A negative load combination
+        factor reverses the load, and with it the sign of its contribution: a gravity load on the
+        top flange taken with a factor of -1 acts away from the shear centre and is stabilising.
+        Likewise, for a distributed load that changes sign along its length, `z_g` refers to the
+        direction of its resultant, and the part acting the other way contributes with the
+        opposite sign.
+
         The twist is interpolated linearly between the member ends, as in the rest of the geometric
-        stiffness matrix. A point load contributes `-|P|·z_g·N(x)ᵀN(x)` at its location and a
-        distributed load `-z_g·∫|w(x)|·N(x)ᵀN(x) dx`, integrated with a 3-point Gauss rule, which is
-        exact for a linearly varying load that does not change sign. Only the component of a load
-        transverse to the member contributes; axial components and moments have no load height
-        effect. Loads are factored by the load combination.
+        stiffness matrix. A point load contributes `-f·|P|·z_g·N(x)ᵀN(x)` at its location, with `f`
+        the load combination factor, and a distributed load `-f·s·z_g·∫w(x)·N(x)ᵀN(x) dx`, with `s`
+        the sign of its resultant, integrated with a 3-point Gauss rule, which is exact for a
+        linearly varying load. Only the component of a load transverse to the member contributes;
+        axial components and moments have no load height effect.
 
         :param combo_name: The load combination whose member loads are considered.
         :type combo_name: str
@@ -489,7 +496,8 @@ class Member3D:
                 if pt_load[3] != case or len(pt_load) < 5 or pt_load[4] == 0.0 or pt_load[0][0] != 'F':
                     continue
 
-                p = abs(factor*pt_load[1])*transverse_fraction(pt_load[0])
+                # A negative load factor reverses the load and so the sign of its effect
+                p = factor*abs(pt_load[1])*transverse_fraction(pt_load[0])
                 add_twist_term(-p*pt_load[4], pt_load[2])
 
             for dist_load in self.DistLoads:
@@ -502,14 +510,22 @@ class Member3D:
                 w1, w2, x1, x2 = factor*dist_load[1], factor*dist_load[2], dist_load[3], dist_load[4]
                 z_g = dist_load[7]
 
+                # The direction the load height refers to: that of the resultant of the physical
+                # member's load, which `PhysMember` passes on with each piece of it
+                if len(dist_load) > 8:
+                    load_sign = dist_load[8]
+                else:
+                    resultant = dist_load[1] + dist_load[2] if dist_load[1] + dist_load[2] != 0.0 else dist_load[2]
+                    load_sign = 1.0 if resultant >= 0.0 else -1.0
+
                 if fraction == 0.0 or x2 <= x1:
                     continue
 
-                # Integrate -|w(x)|·z_g·N(x)ᵀN(x) over the loaded length
+                # Integrate -s·w(x)·z_g·N(x)ᵀN(x) over the loaded length, with `w` already factored
                 for xi, weight in gauss:
                     x = (x1 + x2)/2 + (x2 - x1)/2*xi
                     w = w1 + (w2 - w1)*(x - x1)/(x2 - x1)
-                    add_twist_term(-abs(w)*fraction*z_g*weight*(x2 - x1)/2, x)
+                    add_twist_term(-load_sign*w*fraction*z_g*weight*(x2 - x1)/2, x)
 
         return kg
 

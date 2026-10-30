@@ -20,6 +20,8 @@ get_critical_moment
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from typing import TYPE_CHECKING
@@ -31,7 +33,8 @@ if TYPE_CHECKING:
 
 def get_buckling_length(model: FEModel3D, member_name: str,
                         buckling_results: BucklingResults,
-                        mode: int = 0, plane: str = 'y') -> float:
+                        mode: int = 0, plane: str = 'y',
+                        x: float | None = None) -> float:
     """Return the effective buckling length L_cr for a member.
 
     This is a convenience wrapper around
@@ -53,15 +56,19 @@ def get_buckling_length(model: FEModel3D, member_name: str,
         ``'y'`` → bending about local y-axis (uses section.Iy),
         ``'z'`` → bending about local z-axis (uses section.Iz).
         Default ``'y'``.
+    x : float, optional
+        Location along the member at which to take the axial force. Default
+        ``None``: the largest compression along the member.
 
     Returns
     -------
     float
         L_cr in the same length units as the model geometry.
-        Returns ``inf`` when the member has no axial force.
+        Returns ``inf`` when the member is not in compression.
     """
-    member = model.members[member_name]
-    return buckling_results.effective_length(member, mode=mode, plane=plane)
+    if member_name not in model.members:
+        raise NameError(f"Member '{member_name}' does not exist in the model")
+    return buckling_results.effective_length(member_name, mode=mode, plane=plane, x=x)
 
 
 def get_critical_moment(model: FEModel3D, member_name: str,
@@ -69,12 +76,18 @@ def get_critical_moment(model: FEModel3D, member_name: str,
                         C1: float = 1.0,
                         C2: float = 0.0,
                         k:  float = 1.0,
-                        kw: float = 1.0) -> float:
-    """Compute M_cr for lateral-torsional buckling (LTB).
+                        kw: float = 1.0,
+                        z_g: float = 0.0,
+                        L: float | None = None) -> float:
+    """Compute M_cr for lateral-torsional buckling (LTB) of a doubly symmetric member.
 
-    Uses the three-factor formula from EN 1993-1-1 Annex F / NCCI SN003::
+    Uses the three-factor formula (ENV 1993-1-1 Annex F / NCCI SN003)::
 
-        M_cr = C1 · (π²EIz)/(kL)² · sqrt( Iw/Iz + (kL)²·G·It/(π²EIz) )
+        M_cr = C1 · π²EIz/(kL)² · ( sqrt( (k/kw)²·Iw/Iz + (kL)²·G·It/(π²EIz) + (C2·zg)² ) − C2·zg )
+
+    where Iz is the second moment of area about the section's minor axis. The minor axis is taken
+    as the one with the smaller second moment of area, so the result does not depend on whether
+    the section follows Pynite's or the Eurocode's naming of the axes.
 
     This is the closed-form approach for 6-DOF FEM models that do **not**
     include warping (7th) DOFs.  The warping constant Iw must be supplied on
@@ -87,8 +100,7 @@ def get_critical_moment(model: FEModel3D, member_name: str,
     member_name : str
         Name of the physical member.
     combo_name : str, optional
-        Load combination name (used only to read the unbraced length).
-        Default ``'Combo 1'``.
+        Not used. Kept for backward compatibility.
     C1 : float, optional
         Moment distribution factor (accounts for non-uniform bending).
         Typical values:
@@ -99,8 +111,9 @@ def get_critical_moment(model: FEModel3D, member_name: str,
 
         Default 1.0.
     C2 : float, optional
-        Load position factor (> 0 for destabilising loads above centroid).
-        Default 0.0.
+        Load position factor, used with `z_g`. Typical values: 0.459 for a
+        uniformly distributed load and 0.553 for a midspan point load on a
+        simply supported span. Default 0.0.
     k : float, optional
         Effective length factor for buckling (end rotation restraint).
         k = 1.0 → both ends free to rotate (default).
@@ -108,6 +121,15 @@ def get_critical_moment(model: FEModel3D, member_name: str,
     kw : float, optional
         Effective length factor for warping (end warping restraint).
         kw = 1.0 → both ends free to warp (default).
+        kw = 0.5 → both ends fully restrained against warping.
+    z_g : float, optional
+        Distance from the shear centre to the point where the load is applied.
+        Positive when the load acts towards the shear centre (a gravity load
+        on the top flange, destabilising), negative when it acts away from it
+        (stabilising), as for ``load_height`` in the member loads. Default 0.0.
+    L : float, optional
+        Length between the lateral restraints of the member. Default ``None``:
+        the length of the physical member.
 
     Returns
     -------
@@ -117,31 +139,25 @@ def get_critical_moment(model: FEModel3D, member_name: str,
     Raises
     ------
     AttributeError
-        If the member's section does not have an ``Iw`` attribute.
+        If the member's section has no warping constant ``Iw``.
+    ValueError
+        If `k`, `kw` or `L` is not positive.
 
-    Notes
+    Warns
     -----
-    The C2 term (load position) is omitted from the formula above because
-    without warping DOFs the load-height effect cannot be evaluated from the
-    FEM model.  If the load acts at the top flange (destabilising) supply
-    C2 > 0 and note that the full 3-factor formula from SN003 should be used
-    in that case::
-
-        M_cr = C1 * (π²EIz)/(kL)² *
-               ( sqrt(Iw/Iz + (kL)²GIt/(π²EIz) + (C2·zg)²) - C2·zg )
-
-    where zg is the distance from the centroid to the load application point.
+    UserWarning
+        If `C2` is given without `z_g`: the load position term is ``C2·z_g``,
+        so `C2` alone has no effect.
     """
     member = model.members[member_name]
-    sub    = next(iter(member.sub_members.values()))
 
-    E  = sub.material.E
-    G  = sub.material.G
-    Iz = sub.section.Iz   # minor axis (bending axis for LTB)
-    It = sub.section.J    # St. Venant torsion constant
-    L  = member.L()       # unbraced length
+    E  = member.material.E
+    G  = member.material.G
+    Iz = min(member.section.Iy, member.section.Iz)  # minor axis (bending axis for LTB)
+    It = member.section.J    # St. Venant torsion constant
+    L  = member.L() if L is None else L  # length between lateral restraints
 
-    Iw = getattr(sub.section, 'Iw', None)
+    Iw = getattr(member.section, 'Iw', None)
     if Iw is None:
         raise AttributeError(
             f"Section for member '{member_name}' has no 'Iw' (warping constant). "
@@ -149,12 +165,23 @@ def get_critical_moment(model: FEModel3D, member_name: str,
             "get_critical_moment()."
         )
 
+    if not (k > 0 and kw > 0 and L > 0):
+        raise ValueError(f'`k`, `kw` and `L` must be positive. k={k}, kw={kw}, L={L} were given.')
+
+    if C2 != 0.0 and z_g == 0.0:
+        warnings.warn(
+            '`C2` has no effect without `z_g`: the load position term of M_cr is C2·z_g. Give '
+            'the distance from the shear centre to the load with `z_g`.',
+            UserWarning, stacklevel=2,
+        )
+
     kL   = k * L
     pi2  = np.pi**2
+    C2zg = C2 * z_g
 
-    # EN 1993-1-1 Annex F (simplified, C2·zg = 0)
-    M_cr = C1 * (pi2 * E * Iz / kL**2) * np.sqrt(
-        Iw / Iz + kL**2 * G * It / (pi2 * E * Iz)
-    )
+    # Three-factor formula (C3 is zero for a doubly symmetric section)
+    M_cr = C1 * (pi2 * E * Iz / kL**2) * (np.sqrt(
+        (k / kw)**2 * Iw / Iz + kL**2 * G * It / (pi2 * E * Iz) + C2zg**2
+    ) - C2zg)
 
     return M_cr

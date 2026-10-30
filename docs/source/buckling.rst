@@ -38,8 +38,11 @@ The member geometric stiffness matrix contains two groups of terms (see ``Member
   centre (a gravity load on the top flange, destabilising) and negative when it acts away from it
   (a load hanging from the bottom flange, or uplift on the top flange, stabilising). The
   convention is tied to the load's line of action, so it does not depend on the member's
-  rotation or on whether the load is given in local or global coordinates. Load height only
-  affects the buckling analysis; static results are unchanged. Nodal loads act at the node.
+  rotation or on whether the load is given in local or global coordinates. The sign describes
+  the load as given in its load case: a negative load combination factor reverses the load and
+  with it the effect of its height. For a distributed load that changes sign along the member,
+  the height refers to the direction of the load's resultant. Load height only affects the
+  buckling analysis; static results are unchanged. Nodal loads act at the node.
 
 The moment terms are derived from the second-order work of the initial stresses with the
 Green-Lagrange strain of a doubly symmetric thin-walled beam, with the moment varying linearly
@@ -81,6 +84,10 @@ would otherwise crowd out the in-plane ones.
    the members with ``rotation=90`` so that the strong axis bends in the plane of the frame.
    ``effective_length(..., plane='y')`` then refers to in-plane bending of such a member.
 
+   In an XZ frame with Z up, the local y-axis of every member is horizontal and normal to the
+   frame, so ``Iy`` bends in the plane without a rotation. The out-of-plane DOFs are then DY, RX
+   and RZ.
+
 Member subdivision
 ==================
 
@@ -99,9 +106,17 @@ Results
 - ``load_multipliers`` (alias ``critical_load_factors``): the load factors α_cr, ascending.
 - ``mode_shapes``, ``free_dof_indices`` and ``dof_map``: the mode shapes in the free-DOF basis
   of the eigenproblem, scaled to a largest component of 1, and the node and DOF of each row.
-- ``effective_length(member, mode, plane)``: the flexural buckling length
-  :math:`L_{cr} = \pi\sqrt{EI/(\alpha_{cr} N_{Ed})}` of a member, for EN 1993-1-1 6.3.1 checks.
-  Only meaningful for a compressed member that takes part in the mode.
+- ``effective_length(member, mode, plane, x=None)``: the flexural buckling length
+  :math:`L_{cr} = \pi\sqrt{EI/(\alpha_{cr} N_{Ed})}` of a member about its local ``'y'`` or ``'z'``
+  axis, for EN 1993-1-1 6.3.1 checks with the same :math:`N_{Ed}`. :math:`N_{Ed}` is the largest
+  compression along the member, or the axial force at ``x`` when given (use it for a member that
+  runs through several storeys). A member in tension gets ``inf``. A warning is given when the
+  mode deforms the member but hardly bends it about the requested axis, e.g. an out-of-plane mode
+  asked for an in-plane length: the value is then not a buckling length about that axis. A member
+  that stays straight in the mode gets the length that goes with the mode's :math:`\alpha_{cr}`,
+  which is on the safe side.
+  ``Pynite.EurocodeHelpers.get_critical_moment`` complements it with :math:`M_{cr}` from the
+  three-factor formula (:math:`C_1`, :math:`C_2 z_g`, :math:`k`, :math:`k_w`) for a member check.
 - ``out_of_plane_share(plane)`` and ``classify_modes(plane)``: how much of each mode lives on
   the out-of-plane DOFs, and a label for each mode.
 - ``analysis_model``: the subdivided copy the analysis ran on, holding the first-order results.

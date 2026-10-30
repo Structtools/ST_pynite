@@ -14,6 +14,9 @@ Out-of-plane buckling
 5. Column with unequal second moments of area: the 3D analysis finds the weak-axis Euler load,
    labels the mode out-of-plane, and the in-plane / out-of-plane analyses each return their own
    Euler load.
+5b. Buckling lengths: N_Ed is the largest compression along the member whatever its direction
+   (or the force at a given x), a member in tension gets inf, and asking a mode for the length
+   about an axis it does not bend the member about warns.
 6. Lateral-torsional buckling without warping, against the closed-form solutions of Timoshenko &
    Gere, "Theory of Elastic Stability", Chapter 6 (all with Iw = 0):
    - simply supported beam, uniform moment:      M_cr = (π/L)·sqrt(E·Iy·G·J)
@@ -28,13 +31,16 @@ Out-of-plane buckling
    exactly P_cr = G·J/(L·z_g) and a uniform load at q_cr = (π/2)²·G·J/(L²·z_g); with bending, the
    cantilever follows Timoshenko & Gere's first-order correction (1 - a·sqrt(EI/GJ)/L) for small
    a, and the fork-supported beam with a central point load follows the EN 1993-1-1 Annex F
-   three-factor formula to within its own accuracy.
+   three-factor formula to within its own accuracy. A negative load factor reverses the effect of
+   the height, and a distributed load that changes sign matches the same load given in two pieces;
+   varying distributed loads are split correctly at interior nodes.
 8. Consistency: a beam whose second half is rotated 90° about its axis (with Iy and Iz swapped)
    gives the same critical load as the unrotated beam. This exercises the My terms and the
    local-to-global transformation of the moment terms.
 9. Planar frame: the 3D modes are the union of the in-plane and out-of-plane modes, and for an
    unbraced IPE200 portal frame lateral-torsional buckling governs by a wide margin. The
-   axial-force-only matrix misses it.
+   axial-force-only matrix misses it. The same frame in XZ with Z up gives the same factors as
+   in XY with Y up.
 
 Units: the beam tests are non-dimensional (E = G = 1, L = 1). The frame tests use N and m.
 """
@@ -240,7 +246,11 @@ def test_cantilever_effective_length():
 
     # Check effective buckling length L_cr = π·sqrt(EI / N_cr)
     # With N_cr = λ · |P| = λ · 1 and EI = 1: L_cr = π/sqrt(λ) = 2L for λ = π²/4
-    L_cr_computed = results.effective_length('Column', mode=0, plane='y')
+    # Iy = Iz, so the first two modes are the same Euler load about either axis, in no particular
+    # order, and the mode asked about may bend the column about z rather than y (with a warning)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        L_cr_computed = results.effective_length('Column', mode=0, plane='y')
     L_cr_expected = 2.0 * L   # = 2.0
 
     rel_error_Lcr = abs(L_cr_computed - L_cr_expected) / L_cr_expected
@@ -399,6 +409,96 @@ def test_weak_axis_column_buckles_out_of_plane():
     assert results_out.load_multipliers[0] == pytest.approx(np.pi**2, rel=0.005)
     assert results_out.classify_modes()[0] == 'out-of-plane'
     assert results_out.effective_length('Column', mode=0, plane='y') == pytest.approx(1.0, rel=0.005)
+
+
+# ---------------------------------------------------------------------------
+# Test 5b: Buckling lengths
+# ---------------------------------------------------------------------------
+def _column_with_axial_member_load(base_to_top):
+    """A pin-ended column along Y (E = I = L = 1) with 1 at the top and 2 spread along it, so N = 1 to 3."""
+    model = FEModel3D()
+    model.add_material('Mat', 1.0, 1.0, 0.0, 0.0)
+    model.add_section('Sec', 1e3, 1.0, 1.0, 2.0)
+    model.add_node('Base', 0.0, 0.0, 0.0)
+    model.add_node('Top', 0.0, 1.0, 0.0)
+    if base_to_top:
+        model.add_member('Column', 'Base', 'Top', 'Mat', 'Sec')
+    else:
+        model.add_member('Column', 'Top', 'Base', 'Mat', 'Sec')
+    model.def_support('Base', True, True, True, False, True, False)
+    model.def_support('Top', True, False, True, False, True, False)
+    model.add_node_load('Top', 'FY', -1.0)
+    model.add_member_dist_load('Column', 'FY', -2.0, -2.0)
+    return model
+
+
+def test_effective_length_uses_largest_compression_whatever_the_member_direction():
+    """
+    N_Ed is the largest compression along the member, so the buckling length does not depend on
+    which end is the i-node. With `x` the axial force at that location is used instead.
+    """
+    for base_to_top in (True, False):
+        results = _column_with_axial_member_load(base_to_top).analyze_buckling(num_modes=1, plane='XY')
+        lam = results.load_multipliers[0]
+
+        # In-plane bending of a vertical member is about its local z-axis
+        assert results.effective_length('Column', plane='z') == pytest.approx(np.pi/np.sqrt(3*lam), rel=1e-6)
+
+        x_top = 1.0 if base_to_top else 0.0
+        assert results.effective_length('Column', plane='z', x=x_top) == pytest.approx(np.pi/np.sqrt(lam), rel=1e-6)
+
+
+def test_effective_length_of_member_in_tension_is_infinite():
+    """A member in tension has no flexural buckling length."""
+    model = FEModel3D()
+    model.add_material('Mat', 1.0, 1.0, 0.0, 0.0)
+    model.add_section('Sec', 1e3, 1.0, 1.0, 2.0)
+    for name, X, Y in (('A', 0.0, 0.0), ('B', 0.0, 1.0), ('C', 2.0, 1.0), ('D', 2.0, 0.0)):
+        model.add_node(name, X, Y, 0.0)
+    model.add_member('Col1', 'A', 'B', 'Mat', 'Sec')
+    model.add_member('Beam', 'B', 'C', 'Mat', 'Sec')
+    model.add_member('Col2', 'D', 'C', 'Mat', 'Sec')
+    model.def_support('A', True, True, True, True, True, True)
+    model.def_support('D', True, True, True, True, True, True)
+    model.add_node_load('B', 'FY', -1.0)
+    model.add_node_load('C', 'FY', 0.2)   # lifts Col2 into tension
+
+    results = model.analyze_buckling(num_modes=1, plane='XY')
+
+    assert model.members['Col2'].axial(0.0, 'Combo 1') < 0.0
+    assert results.effective_length('Col2', plane='z') == float('inf')
+    assert np.isfinite(results.effective_length('Col1', plane='z'))
+
+
+def test_effective_length_warns_when_the_mode_does_not_bend_the_member_about_the_axis():
+    """
+    The weak-axis mode of the column of Test 5 bends it about its local y-axis only. Asking that
+    mode for the length about the local z-axis (in-plane) gives no buckling length about it and
+    warns; the in-plane analysis gives the in-plane length without a warning. A member of the
+    caller's model may be passed instead of its name.
+    """
+    support_base = (True, True, True, False, True, False)
+    support_top = (True, False, True, False, True, False)
+    model = _build_column(1, E=1.0, G=1.0, nu=0.0, A=1e3, Iy=1.0, Iz=4.0, J=5.0, L=1.0,
+                          support_base=support_base, support_top=support_top, P=-1.0)
+
+    results_3d = model.analyze_buckling(num_modes=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        assert results_3d.effective_length('Column', mode=0, plane='y') == pytest.approx(1.0, rel=0.005)
+        assert results_3d.effective_length(model.members['Column'], plane='y') == \
+            results_3d.effective_length('Column', plane='y')
+
+    with pytest.warns(UserWarning, match="hardly bends member 'Column' about its local z-axis"):
+        results_3d.effective_length('Column', mode=0, plane='z')
+
+    results_in = model.analyze_buckling(num_modes=1, plane='XY')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        assert results_in.effective_length('Column', mode=0, plane='z') == pytest.approx(1.0, rel=0.005)
+
+    with pytest.raises(ValueError):
+        results_in.effective_length('Column', plane='x')
 
 
 # ---------------------------------------------------------------------------
@@ -740,6 +840,76 @@ def test_load_height_is_rejected_for_moments():
         model.add_member_pt_load('Beam', 'Mz', 1.0, 0.5, load_height=0.1)
 
 
+def test_load_height_negative_load_factor_reverses_its_effect():
+    """
+    The load height describes the load as defined in its load case. A factor of -1 reverses the
+    load: a downward load on the top flange then acts upward, away from the shear centre, and
+    stabilises, while a downward load hanging from the bottom flange then acts towards the shear
+    centre and twists the stiff cantilever over at P_cr = G·J/(L·z_g).
+    """
+    def critical_load(z_g, factor):
+        model = _stiff_cantilever()
+        model.add_member_pt_load('Beam', 'FY', -1.0, 1.0, case='D', load_height=z_g)
+        model.add_load_combo('C', {'D': factor})
+        return model.analyze_buckling(combo_name='C', num_modes=1).load_multipliers[0]
+
+    assert critical_load(0.25, 1.0) == pytest.approx(1.0/(1.0*0.25), rel=1e-5)
+    assert critical_load(0.25, -1.0) > 100.0
+    assert critical_load(-0.25, 1.0) > 100.0
+    assert critical_load(-0.25, -1.0) == pytest.approx(1.0/(1.0*0.25), rel=1e-5)
+
+
+def test_load_height_distributed_load_changing_sign_matches_split_load():
+    """
+    For a distributed load that changes sign, the load height refers to the direction of its
+    resultant and the part acting the other way has the opposite effect. The load w(x) = 1 - 4x on
+    the top flange (resultant downward) must give the critical load of the same load given as two
+    pieces, the upward piece 0 <= x <= 0.25 with the opposite load height. Both integrals are exact.
+    The upward piece falls on whole sub-members of the subdivision, which must still see the
+    direction of the whole load.
+    """
+    z_g = 0.25
+
+    whole = _stiff_cantilever()
+    whole.add_member_dist_load('Beam', 'FY', 1.0, -3.0, load_height=z_g)
+
+    split = _stiff_cantilever()
+    split.add_member_dist_load('Beam', 'FY', 1.0, 0.0, x1=0.0, x2=0.25, load_height=-z_g)
+    split.add_member_dist_load('Beam', 'FY', 0.0, -3.0, x1=0.25, x2=1.0, load_height=z_g)
+
+    lam_whole = whole.analyze_buckling(num_modes=1).load_multipliers[0]
+    lam_split = split.analyze_buckling(num_modes=1).load_multipliers[0]
+
+    assert lam_whole == pytest.approx(lam_split, rel=1e-6)
+
+
+def test_varying_distributed_load_is_split_correctly_at_interior_nodes():
+    """
+    A physical member running through interior nodes carries a varying distributed load in
+    pieces, one per sub-member. The pieces must follow the original load, so a triangular load on
+    a simply supported beam with interior nodes gives the textbook reactions. The buckling
+    analysis subdivides every member, so its pre-solve depends on this too.
+    """
+    model = FEModel3D()
+    model.add_material('Mat', 1.0, 1.0, 0.0, 0.0)
+    model.add_section('Sec', 1.0, 1.0, 1.0, 1.0)
+    model.add_node('A', 0.0, 0.0, 0.0)
+    for i in (1, 2, 3):
+        model.add_node(f'I{i}', float(i), 0.0, 0.0)
+    model.add_node('B', 4.0, 0.0, 0.0)
+    model.add_member('Beam', 'A', 'B', 'Mat', 'Sec')
+    model.def_support('A', True, True, True, True, False, False)
+    model.def_support('B', False, True, True, False, False, False)
+    model.add_member_dist_load('Beam', 'Fy', 0.0, -12.0)   # total 24, resultant at 2/3 of the span
+
+    model.analyze_linear()
+
+    assert model.nodes['A'].RxnFY['Combo 1'] == pytest.approx(8.0, rel=1e-9)
+    assert model.nodes['B'].RxnFY['Combo 1'] == pytest.approx(16.0, rel=1e-9)
+    pieces = [(load[1], load[2]) for sub in model.members['Beam'].sub_members.values() for load in sub.DistLoads]
+    assert pieces == pytest.approx([(0.0, -3.0), (-3.0, -6.0), (-6.0, -9.0), (-9.0, -12.0)])
+
+
 # ---------------------------------------------------------------------------
 # Test 8: Rotated member consistency
 # ---------------------------------------------------------------------------
@@ -803,6 +973,71 @@ def test_portal_frame_modes_are_union_of_in_plane_and_out_of_plane_modes():
     assert results_out.classify_modes() == ['out-of-plane']*6
     assert results_in.plane == 'XY' and not results_in.out_of_plane
     assert results_out.plane == 'XY' and results_out.out_of_plane
+
+
+def _portal_frame_in_plane(plane, hold_base_twist=True):
+    """The portal frame of `_portal_frame` (braced eaves, top flange load) built in XY with Y up or in XZ with Z up."""
+    up, oop = ('Y', 'Z') if plane == 'XY' else ('Z', 'Y')
+
+    def point(x, v):
+        return (x, v, 0.0) if plane == 'XY' else (x, 0.0, v)
+
+    model = FEModel3D()
+    model.add_material('Steel', E_STEEL, G_STEEL, 0.3, 0.0)
+    model.add_section('IPE200', **IPE200)
+    for name, x, v in (('A', 0.0, 0.0), ('B', 0.0, 3.0), ('C', 5.0, 3.0), ('D', 5.0, 0.0)):
+        model.add_node(name, *point(x, v))
+
+    # In XZ the local y-axis of every member is horizontal and out of plane, so the Eurocode strong
+    # axis (Iy) bends in the plane without a rotation; in XY it takes rotation=90
+    rotation = 90 if plane == 'XY' else 0
+    model.add_member('Col1', 'A', 'B', 'Steel', 'IPE200', rotation=rotation)
+    model.add_member('Beam', 'B', 'C', 'Steel', 'IPE200', rotation=rotation)
+    model.add_member('Col2', 'D', 'C', 'Steel', 'IPE200', rotation=rotation)
+
+    dofs = ('DX', 'DY', 'DZ', 'RX', 'RY', 'RZ')
+    base = {'DX', 'DY', 'DZ', 'R' + oop} | ({'R' + up} if hold_base_twist else set())
+    for name in ('A', 'D'):
+        model.def_support(name, *[dof in base for dof in dofs])
+    for name in ('B', 'C'):
+        model.def_support(name, *[dof == 'D' + oop for dof in dofs])
+
+    model.add_member_dist_load('Beam', 'F' + up, -10e3, -10e3, load_height=0.1)
+    model.add_node_load('B', 'FX', 2e3)
+    return model
+
+
+def test_frame_in_xz_plane_matches_frame_in_xy_plane():
+    """
+    A frame in the XZ plane with Z up, as the structuraltools backend builds it, gives the same
+    in-plane and out-of-plane critical load factors as the same frame in XY with Y up, its
+    eigenproblems hold only the in-plane (DX, DZ, RY) and out-of-plane (DY, RX, RZ) DOFs, columns
+    are in compression, and a twist-free base on the default warping length warns about warping.
+    """
+    def run(plane, **kwargs):
+        model = _portal_frame_in_plane(plane)
+        return model, model.analyze_buckling(num_modes=3, plane=plane, **kwargs)
+
+    model_xz, in_xz = run('XZ')
+    _, in_xy = run('XY')
+    _, out_xz = run('XZ', out_of_plane=True, warping='equivalent_torsion')
+    _, out_xy = run('XY', out_of_plane=True, warping='equivalent_torsion')
+
+    np.testing.assert_allclose(in_xz.load_multipliers, in_xy.load_multipliers, rtol=1e-6)
+    np.testing.assert_allclose(out_xz.load_multipliers, out_xy.load_multipliers, rtol=1e-6)
+    assert in_xz.mode_count == out_xz.mode_count == 3
+
+    assert {dof for _, dof in in_xz.dof_map} == {'DX', 'DZ', 'RY'}
+    assert {dof for _, dof in out_xz.dof_map} == {'DY', 'RX', 'RZ'}
+    assert in_xz.mode_shapes.shape == (len(in_xz.dof_map), 3)
+
+    # Compression positive, on the analysis copy and on the caller's model
+    assert in_xz.analysis_model.members['Col1'].axial(0.0, 'Combo 1') > 0.0
+    assert model_xz.members['Col1'].axial(0.0, 'Combo 1') > 0.0
+
+    model = _portal_frame_in_plane('XZ', hold_base_twist=False)
+    with pytest.warns(UserWarning, match='warping'):
+        model.analyze_buckling(num_modes=1, plane='XZ', out_of_plane=True, warping='equivalent_torsion')
 
 
 def test_unbraced_portal_frame_governed_by_lateral_torsional_buckling():
