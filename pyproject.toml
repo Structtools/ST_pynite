@@ -62,6 +62,13 @@ dev = [
     "flake8",
     "pytest",
 ]
+# Capturing PolyFrame reports (Testing/polyframe): reads the PDF and OCRs the
+# rendered formula images. Not needed by pytest.
+polyframe = [
+    "pymupdf",
+    "pillow",
+    "rapidocr_onnxruntime",
+]
 
 [tool.setuptools.packages.find]
 include = ["Pynite", "Pynite.*"]

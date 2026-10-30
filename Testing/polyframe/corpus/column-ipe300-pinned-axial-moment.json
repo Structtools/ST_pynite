@@ -1,0 +1,41 @@
+{
+  "case_id": "column-ipe300-pinned-axial-moment",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 102.9,
+    "alpha_cr_ip_source": "text",
+    "alpha_cr_op": 6.2,
+    "alpha_cr_op_formula_ocr": 6.2,
+    "alpha_cr_op_plot_ocr": [
+      6.2,
+      6.2
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      12.88
+    ],
+    "axial_kn": {
+      "1": -100.0,
+      "2": 0.0
+    },
+    "governing_element_op": 1,
+    "moment_knm": {
+      "1": 5.0,
+      "2": 0.0
+    },
+    "uls_utilization": 0.25543777921831007,
+    "util_cross_section": 0.09,
+    "util_stability": 0.26
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "c4440db1f277c9592ac148e5492f5fdc54be308a4c10051bf98691090af8b1de",
+    "ocr": true,
+    "report": "column-ipe300-pinned-axial-moment.pdf"
+  },
+  "title": "IPE300 column 4 m, pinned base, roller top, 100 kN axial + 5 kN at mid-height"
+}

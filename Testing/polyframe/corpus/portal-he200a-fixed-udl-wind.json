@@ -1,0 +1,43 @@
+{
+  "case_id": "portal-he200a-fixed-udl-wind",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 101.0,
+    "alpha_cr_ip_source": "text",
+    "alpha_cr_op": 6.0,
+    "alpha_cr_op_formula_ocr": 6.0,
+    "alpha_cr_op_plot_ocr": [
+      6.0,
+      6.0
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      5.29
+    ],
+    "axial_kn": {
+      "1": -28.6722,
+      "2": -10.7752,
+      "3": -31.3278
+    },
+    "governing_element_op": 3,
+    "moment_knm": {
+      "1": -18.331,
+      "2": -26.2979,
+      "3": 26.2979
+    },
+    "uls_utilization": 0.3934417513703788,
+    "util_cross_section": 0.23,
+    "util_stability": 0.39
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "1b7b293e4d602e0a3f646d3a689092a067f4d61699f7e2e27a44391a13ef75ee",
+    "ocr": true,
+    "report": "portal-he200a-fixed-udl-wind.pdf"
+  },
+  "title": "HE200A portal 6 x 4 m, fixed bases, 10 kN/m on the beam + 5 kN wind"
+}
