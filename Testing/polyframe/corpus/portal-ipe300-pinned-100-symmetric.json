@@ -1,0 +1,43 @@
+{
+  "case_id": "portal-ipe300-pinned-100-symmetric",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 17.2,
+    "alpha_cr_ip_source": "text",
+    "alpha_cr_op": 7.8,
+    "alpha_cr_op_formula_ocr": 7.8,
+    "alpha_cr_op_plot_ocr": [
+      7.8,
+      7.8
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      18.71
+    ],
+    "axial_kn": {
+      "1": -100.0,
+      "2": 0.0,
+      "3": -100.0
+    },
+    "governing_element_op": 1,
+    "moment_knm": {
+      "1": 0.0,
+      "2": 0.0,
+      "3": 0.0
+    },
+    "uls_utilization": 0.19745877093299272,
+    "util_cross_section": 0.06,
+    "util_stability": 0.2
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "6f5f2b934637ee5d2bf738b92a070af1444ce3a0f7f2c13603f07913396348e3",
+    "ocr": true,
+    "report": "portal-ipe300-pinned-100-symmetric.pdf"
+  },
+  "title": "IPE300 portal 6 x 4 m, pinned bases, 100 kN on each column, no wind"
+}

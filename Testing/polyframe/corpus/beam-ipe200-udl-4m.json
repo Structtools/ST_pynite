@@ -1,0 +1,43 @@
+{
+  "case_id": "beam-ipe200-udl-4m",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": null,
+    "alpha_cr_ip_source": null,
+    "alpha_cr_op": 4.12,
+    "alpha_cr_op_formula_ocr": 4.12,
+    "alpha_cr_op_plot_ocr": [
+      4.12,
+      4.12
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      7.83
+    ],
+    "axial_kn": {
+      "1": 0.0,
+      "2": -0.0,
+      "3": -0.0
+    },
+    "governing_element_op": 1,
+    "moment_knm": {
+      "1": 10.0,
+      "2": -0.0,
+      "3": 0.0
+    },
+    "uls_utilization": 0.3169532041159648,
+    "util_cross_section": 0.14,
+    "util_stability": 0.32
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "5cf70d9e9476810a2d6255fbd118031ad9fafb09e649271022c61ce68dbdf63e",
+    "ocr": true,
+    "report": "beam-ipe200-udl-4m.pdf"
+  },
+  "title": "IPE200 beam 4 m, simply supported, 5 kN/m at the shear centre"
+}

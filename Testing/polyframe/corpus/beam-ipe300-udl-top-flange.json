@@ -1,0 +1,43 @@
+{
+  "case_id": "beam-ipe300-udl-top-flange",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": null,
+    "alpha_cr_ip_source": null,
+    "alpha_cr_op": 3.54,
+    "alpha_cr_op_formula_ocr": 3.54,
+    "alpha_cr_op_plot_ocr": [
+      3.54,
+      3.54
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      9.91
+    ],
+    "axial_kn": {
+      "1": 0.0,
+      "2": -0.0,
+      "3": 0.0
+    },
+    "governing_element_op": 1,
+    "moment_knm": {
+      "1": 22.5,
+      "2": 0.0,
+      "3": -0.0
+    },
+    "uls_utilization": 0.3393964462394583,
+    "util_cross_section": 0.11,
+    "util_stability": 0.34
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "72bea7eb2efcd2bac6918d273e64371f87f79231383a04ede895648c906eb38d",
+    "ocr": true,
+    "report": "beam-ipe300-udl-top-flange.pdf"
+  },
+  "title": "IPE300 beam 6 m, simply supported, 5 kN/m on the top flange"
+}

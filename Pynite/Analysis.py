@@ -10,13 +10,13 @@ import scipy as sp
 from scipy.sparse.linalg import eigsh, spsolve
 from scipy.sparse.linalg import ArpackNoConvergence
 
-from numpy import array, atleast_2d, zeros, subtract, matmul, divide, seterr, nanmax, asarray, isfinite
+from numpy import array, zeros, subtract, matmul, asarray, isfinite
 from numpy.linalg import solve, norm, LinAlgError
 
 from Pynite.LoadCombo import LoadCombo
+from Pynite.ModalResults import fix_mode_shape_signs
 
 if TYPE_CHECKING:
-    from typing import List, Tuple
     from Pynite.FEModel3D import FEModel3D
     from numpy import float64
     from numpy.typing import NDArray
@@ -27,75 +27,266 @@ if TYPE_CHECKING:
 class BucklingResults:
     """Results from a linear buckling (stability) eigenvalue analysis.
 
+    The analysis runs on an internal, possibly subdivided, copy of the user's model. That copy is
+    kept as `analysis_model` so that the first-order member forces behind the geometric stiffness
+    matrix, and the buckling lengths derived from them, can be queried after the analysis.
+
     Attributes
     ----------
     load_multipliers : np.ndarray
-        Load multipliers λ sorted ascending. The smallest positive λ is the
-        critical load factor: P_cr = λ · P_applied.
+        Load multipliers λ (α_cr in EN 1993-1-1 terminology) sorted ascending. The smallest is the
+        critical load factor: the loads of `combo_name` multiplied by λ reach the elastic critical
+        load.
     mode_shapes : np.ndarray
-        Buckling mode shape vectors (columns) in the free-DOF basis.
+        Buckling mode shapes, one column per mode, in the free-DOF basis of the eigenproblem. Each
+        mode is scaled so that its largest component has magnitude 1. `free_dof_indices` and
+        `dof_map` say which DOF each row belongs to. The mode shapes are also stored on the model
+        as the displacements of the load combinations `Buckling Mode 1`, `Buckling Mode 2`, ...
+        (tagged `'buckling'`) so that they can be rendered like any other combination.
     combo_name : str
-        Name of the load combination used for the static pre-solve.
+        Name of the load combination used for the first-order static pre-solve.
+    free_dof_indices : np.ndarray
+        Global DOF index (node ID*6 + dof) of each row of `mode_shapes`, on `analysis_model`.
+    dof_map : list[tuple[str, str]]
+        `(node name, dof)` for each row of `mode_shapes`, e.g. `('N3', 'DZ')`.
+    plane : str | None
+        The analysis plane that was declared (`'XY'`, `'XZ'`, `'YZ'`), or `None` for a full 3D
+        analysis.
+    out_of_plane : bool
+        Whether the eigenproblem was restricted to the out-of-plane degrees of freedom of `plane`.
+    include_moments : bool
+        Whether the bending moment, shear and torque terms of the geometric stiffness matrix were
+        included (lateral-torsional buckling).
+    warping : str
+        How warping stiffness was treated: `'ignore'` or `'equivalent_torsion'`.
+    elements_per_member : int
+        The number of elements each physical member was subdivided into for the analysis.
+    solver : str
+        Which eigensolver was used: `'dense'` or `'sparse'`.
+    requested_modes : int
+        The number of modes that were asked for. Fewer may have been found.
+    analysis_model : FEModel3D
+        The copy of the model the analysis was actually run on.
     """
 
     load_multipliers: np.ndarray
     mode_shapes: np.ndarray
     combo_name: str
-    _model: object   # FEModel3D reference — used by effective_length()
-    _D1_indices: list
-    _D2_indices: list
+    free_dof_indices: np.ndarray
+    dof_map: list
+    analysis_model: object
+    plane: str | None = None
+    out_of_plane: bool = False
+    include_moments: bool = True
+    warping: str = 'ignore'
+    elements_per_member: int = 1
+    solver: str = 'dense'
+    requested_modes: int = 0
+
+    # Degrees of freedom that carry out-of-plane motion for each analysis plane
+    _OUT_OF_PLANE_DOFS = {'XY': (2, 3, 4), 'XZ': (1, 3, 5), 'YZ': (0, 4, 5)}
+
+    # Local member end DOFs of the bending about each local axis: the transverse displacement and
+    # the bending rotation at both ends
+    _BENDING_DOFS = {'y': [2, 4, 8, 10], 'z': [1, 5, 7, 11]}
 
     @property
     def critical_load_factors(self) -> np.ndarray:
-        """Alias for load_multipliers (EN 1993 terminology)."""
+        """Alias for `load_multipliers` (EN 1993-1-1 terminology: α_cr)."""
         return self.load_multipliers
 
-    def effective_length(self, member, mode: int = 0, plane: str = 'y') -> float:
-        """Compute the effective buckling length L_cr for a member.
+    @property
+    def mode_count(self) -> int:
+        """The number of buckling modes that were found."""
+        return int(self.load_multipliers.size)
 
-        Uses the Euler formula: L_cr = π · sqrt(EI / N_cr)
-        where N_cr = λ · |N_Ed| and N_Ed is the member axial force from the
-        static pre-solve.
+    @property
+    def truncated(self) -> bool:
+        """Whether fewer modes were found than were requested."""
+        return self.mode_count < self.requested_modes
+
+    def effective_length(self, member, mode: int = 0, plane: str = 'y',
+                         x: float | None = None) -> float:
+        """Compute the effective (flexural) buckling length L_cr of a member from a buckling mode.
+
+        Uses the Euler formula `L_cr = π · sqrt(EI / N_cr)` with `N_cr = λ · N_Ed`, where `N_Ed` is
+        the member's compressive axial force from the first-order pre-solve. This is the usual way
+        of turning a frame's critical load factor into a buckling length for an EN 1993-1-1 clause
+        6.3.1 check, with the same `N_Ed` in the check. By default `N_Ed` is the largest compression
+        along the member, so the result does not depend on which end is the i-node.
+
+        The length is that of the mode's flexural buckling about the requested axis only when the
+        mode bends the member about that axis. A warning is given when the mode deforms the member
+        but hardly bends it about that axis (an out-of-plane mode asked for an in-plane length, or
+        the other way round). A member that stays straight in the mode gets the length that
+        corresponds to the mode's λ, which is longer than its own buckling length and so on the safe
+        side. For a lateral-torsional mode the Euler formula does not apply.
 
         Parameters
         ----------
         member : str or PhysMember
-            Member name or object.
+            Member name or object. An object is looked up by its name on `analysis_model`, so a
+            member of the caller's model may be passed too.
         mode : int
             Buckling mode index (0 = lowest/critical). Default 0.
         plane : str
-            ``'y'`` for bending about local y-axis (uses Iy),
-            ``'z'`` for bending about local z-axis (uses Iz). Default ``'y'``.
+            ``'y'`` for bending about the local y-axis (uses Iy),
+            ``'z'`` for bending about the local z-axis (uses Iz). Default ``'y'``. Which one bends in
+            the plane of a planar frame depends on the member's rotation (see the docs).
+        x : float, optional
+            Location along the member at which to take `N_Ed`. Defaults to ``None``: the largest
+            compression along the member. Give it for a member that runs through intermediate nodes
+            with different axial forces between them (a column continuous over several storeys) to
+            get the buckling length that goes with the segment containing `x`.
 
         Returns
         -------
         float
             L_cr in the same length units as the model geometry.
-            Returns ``inf`` if the member has no axial force.
+            Returns ``inf`` if the member is not in compression (anywhere along it, or at `x`).
+
+        Raises
+        ------
+        ValueError
+            If `plane` is not ``'y'`` or ``'z'``.
         """
-        if isinstance(member, str):
-            member = self._model.members[member]
+        plane = plane.lower()
+        if plane not in self._BENDING_DOFS:
+            raise ValueError(f"`plane` must be 'y' or 'z'. '{plane}' was given.")
+
+        # Always use the analysis copy: it holds the subdivided members and the mode shapes
+        name = member if isinstance(member, str) else member.name
+        member = self.analysis_model.members[name]
 
         lam = self.load_multipliers[mode]
 
-        # Axial force at the i-end from the static pre-solve (positive = compression)
-        N_Ed = member.axial(x=0.0, combo_name=self.combo_name)
-        if abs(N_Ed) < 1e-12:
+        # Axial force from the static pre-solve (positive = compression)
+        if x is None:
+            N_Ed = member.max_axial(self.combo_name)
+        else:
+            N_Ed = member.axial(x, self.combo_name)
+
+        # A member in tension has no flexural buckling length
+        if N_Ed < 1e-12:
             return float('inf')
 
-        N_cr = lam * abs(N_Ed)
+        self._check_bending_axis(member, mode, plane)
+
+        N_cr = lam * N_Ed
 
         # Section properties from the first sub-member
         sub = next(iter(member.sub_members.values()))
         E = sub.material.E
-        I = sub.section.Iy if plane.lower() == 'y' else sub.section.Iz
+        I = sub.section.Iy if plane == 'y' else sub.section.Iz
 
         return np.pi * np.sqrt(E * I / N_cr)
 
+    def _check_bending_axis(self, member, mode: int, plane: str, tol: float = 0.05) -> None:
+        """Warns when a mode deforms a member but hardly bends it about one of its local axes.
 
-def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
-                      num_modes: int = 5) -> BucklingResults:
-    """Perform linear buckling (stability) eigenvalue analysis.
+        The share is the part of the member's elastic strain energy in the mode that comes from
+        bending about the axis. A member whose strain energy is a negligible part of the mode's total
+        is taken as not taking part in the mode, and gets no warning.
+
+        :param member: The physical member on `analysis_model`.
+        :param mode: The buckling mode index.
+        :param plane: ``'y'`` or ``'z'``, the local bending axis.
+        :param tol: The share of the member's strain energy below which the warning is given.
+                    Defaults to 0.05.
+        """
+
+        combo_name = f'Buckling Mode {mode + 1}'
+        dofs = self._BENDING_DOFS[plane]
+
+        def strain_energy(sub, dofs=None):
+            d = sub.d(combo_name)
+            k = sub.ke()
+            if dofs is not None:
+                d = d[dofs, :]
+                k = k[np.ix_(dofs, dofs)]
+            return 0.5*float((d.T @ k @ d)[0, 0])
+
+        U_mode = sum(strain_energy(sub) for phys_member in self.analysis_model.members.values()
+                     for sub in phys_member.sub_members.values())
+        U_member = sum(strain_energy(sub) for sub in member.sub_members.values())
+
+        if U_mode <= 0.0 or U_member <= 1e-6*U_mode:
+            return
+
+        share = sum(strain_energy(sub, dofs) for sub in member.sub_members.values())/U_member
+
+        if share < tol:
+            warnings.warn(
+                f"Buckling mode {mode + 1} hardly bends member '{member.name}' about its local "
+                f"{plane}-axis ({share:.1%} of its strain energy in the mode). The effective length "
+                f"about that axis from this mode is not a buckling length about it; use a mode in "
+                f"which the member buckles about its {plane}-axis, e.g. from an analysis restricted to "
+                "that plane.",
+                UserWarning, stacklevel=3,
+            )
+
+    def out_of_plane_share(self, plane: str | None = None) -> np.ndarray:
+        """Returns, for each mode, the share of the mode shape carried by out-of-plane DOFs.
+
+        For a planar frame loaded in its plane the in-plane and out-of-plane degrees of freedom are
+        uncoupled in both the elastic and the geometric stiffness matrices, so every mode is either
+        purely in-plane (share 0) or purely out-of-plane (share 1). Intermediate values indicate a
+        model that is not actually planar, or a mode whose in-plane and out-of-plane parts happen to
+        share an eigenvalue.
+
+        :param plane: The plane of the frame: `'XY'`, `'XZ'` or `'YZ'`. Defaults to the plane the
+                      analysis was run with.
+        :type plane: str, optional
+        :return: The out-of-plane share of each mode, between 0 and 1
+        :rtype: np.ndarray
+        """
+
+        plane = plane if plane is not None else self.plane
+        if plane not in self._OUT_OF_PLANE_DOFS:
+            raise ValueError(f"`plane` must be 'XY', 'XZ' or 'YZ'. '{plane}' was given.")
+
+        oop = np.isin(np.asarray(self.free_dof_indices) % 6, self._OUT_OF_PLANE_DOFS[plane])
+        total = np.sum(self.mode_shapes**2, axis=0)
+
+        with np.errstate(invalid='ignore', divide='ignore'):
+            share = np.sum(self.mode_shapes[oop, :]**2, axis=0)/total
+
+        return np.nan_to_num(share)
+
+    def classify_modes(self, plane: str | None = None, tol: float = 0.05) -> list:
+        """Labels each mode `'in-plane'`, `'out-of-plane'` or `'coupled'`.
+
+        :param plane: The plane of the frame: `'XY'`, `'XZ'` or `'YZ'`. Defaults to the plane the
+                      analysis was run with.
+        :type plane: str, optional
+        :param tol: The out-of-plane share below which a mode counts as in-plane, and above
+                    `1 - tol` as out-of-plane. Defaults to 0.05.
+        :type tol: float, optional
+        :return: One label per mode
+        :rtype: list[str]
+        """
+
+        labels = []
+        for share in self.out_of_plane_share(plane):
+            if share <= tol:
+                labels.append('in-plane')
+            elif share >= 1 - tol:
+                labels.append('out-of-plane')
+            else:
+                labels.append('coupled')
+
+        return labels
+
+
+def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1', num_modes: int = 5,
+                      include_moments: bool = True, eigen_restrained_dofs=(),
+                      log: bool = False) -> BucklingResults:
+    """Perform linear buckling (stability) eigenvalue analysis on a prepared model.
+
+    This is the solver behind :meth:`FEModel3D.analyze_buckling`, which is the method to call.
+    `analyze_buckling` makes the subdivided analysis copy, applies the analysis plane and the
+    warping option, and copies the results back; this function does the mechanics on the model it
+    is given, and modifies that model (displacements, load combinations, numbering).
 
     Solves the generalised eigenvalue problem::
 
@@ -104,9 +295,10 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     where
 
     * K   = global elastic stiffness matrix (free DOFs only)
-    * Kg  = global geometric stiffness matrix assembled using the member axial
-            forces from a first-order static solve under *combo_name*
-    * λ   = eigenvalues → load multipliers to the critical buckling load
+    * Kg  = global geometric stiffness matrix assembled from the member forces of a first-order
+            static solve under *combo_name*: axial forces and, when `include_moments` is `True`,
+            bending moments, shear forces and torques
+    * λ   = eigenvalues → load multipliers to the critical buckling load (α_cr)
     * φ   = eigenvectors → buckling mode shapes
 
     The smallest positive λ gives the critical load factor:
@@ -116,27 +308,34 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     -----
     1. Prepare the model (reset displacements, renumber nodes/elements).
     2. Partition DOFs into free (D1) and restrained (D2).
-    3. Run a first-order static solve for *combo_name* to populate member
-       axial forces (required for Kg assembly).
-    4. Assemble K and Kg; partition both to free DOFs.
-    5. Reformulate ``K φ = λ (−Kg) φ`` as ``(−Kg) φ = μ K φ`` (where
-       ``μ = 1/λ``), then call ``eigsh(−Kg11, M=K11, which='LA', k=k)``
-       to find the *largest algebraic* μ values.  K11 is the symmetric
-       positive-definite M-matrix; −Kg11 is the (possibly indefinite)
-       A-matrix.  No sigma-shift or regularisation is needed.
-    6. Keep only positive μ (positive μ ↔ positive λ, i.e. buckling under
-       load amplification; negative μ would require load reversal).
-       Convert ``λ = 1/μ`` and sort ascending so the smallest load
-       multiplier comes first.
+    3. Run a first-order static solve for *combo_name* to populate the member forces.
+    4. Assemble K and Kg; partition both to the free DOFs of the eigenproblem, which are the free
+       DOFs of the model less any in `eigen_restrained_dofs`.
+    5. Solve ``(−Kg) φ = μ K φ`` for the largest algebraic ``μ = 1/λ``. K is symmetric positive
+       definite, −Kg symmetric and in general indefinite. Small problems are solved densely, large
+       ones with ARPACK (`eigsh`).
+    6. Keep only positive μ (positive μ ↔ positive λ, i.e. buckling under load amplification;
+       negative μ would require load reversal), convert ``λ = 1/μ`` and sort ascending.
+    7. Scale each mode shape to a largest component of 1, give it a deterministic sign, and store
+       it on the model as the displacements of the load combination ``Buckling Mode n``.
 
     Parameters
     ----------
     model : FEModel3D
+        The model to analyse. It is modified.
     combo_name : str
-        Load combination to use for the static pre-solve. Defaults to
-        ``'Combo 1'``.
+        Load combination to use for the static pre-solve. Defaults to ``'Combo 1'``.
     num_modes : int
         Number of buckling modes to compute. Defaults to 5.
+    include_moments : bool
+        Include the bending moment, shear and torque terms of the geometric stiffness matrix
+        (lateral-torsional buckling). Defaults to ``True``.
+    eigen_restrained_dofs : iterable of int
+        DOF offsets (0 = DX, 1 = DY, 2 = DZ, 3 = RX, 4 = RY, 5 = RZ) to restrain in the
+        eigenproblem only. The static pre-solve uses the model's own supports. Used to isolate
+        out-of-plane buckling by restraining the in-plane DOFs. Defaults to none.
+    log : bool
+        Print progress to the console. Defaults to ``False``.
 
     Returns
     -------
@@ -145,36 +344,26 @@ def buckling_analysis(model: FEModel3D, combo_name: str = 'Combo 1',
     Raises
     ------
     ValueError
-        If all DOFs are restrained, or if Kg is identically zero (no axial
-        loads).
+        If all DOFs are restrained, if the static pre-solve is singular, or if Kg is identically
+        zero (no member forces).
     RuntimeError
-        If the static pre-solve or the eigenvalue solve fails.
+        If the eigenvalue solve fails.
     """
-    # ------------------------------------------------------------------ #
-    # Step 0: Force Timoshenko for all members during stability analysis   #
-    # ------------------------------------------------------------------ #
-    _set_force_timoshenko(model, True)
-
-    try:
-        return _buckling_analysis_inner(model, combo_name, num_modes)
-    finally:
-        _set_force_timoshenko(model, False)
-
-
-def _set_force_timoshenko(model: FEModel3D, value: bool) -> None:
-    """Set _force_timoshenko on all sub-members (and physical members) in the model."""
-    for phys_member in model.members.values():
-        phys_member._force_timoshenko = value
-        for sub_member in phys_member.sub_members.values():
-            sub_member._force_timoshenko = value
-
-
-def _buckling_analysis_inner(model, combo_name, num_modes):
 
     # ------------------------------------------------------------------ #
     # Step 1: Prepare model                                                #
     # ------------------------------------------------------------------ #
+    # Remove any buckling load combinations from a prior analysis first, so that a model holding
+    # nothing but those still gets its default load combination from `_prepare_model`
+    to_remove = [name for name, combo in model.load_combos.items()
+                 if combo.combo_tags is not None and 'buckling' in combo.combo_tags]
+    for name in to_remove:
+        model.load_combos.pop(name)
+
     _prepare_model(model)
+
+    if combo_name not in model.load_combos:
+        raise ValueError(f"Load combination '{combo_name}' does not exist in the model.")
 
     # ------------------------------------------------------------------ #
     # Step 2: DOF partitioning                                             #
@@ -184,8 +373,11 @@ def _buckling_analysis_inner(model, combo_name, num_modes):
     # ------------------------------------------------------------------ #
     # Step 3: First-order static solve for combo_name                     #
     #         Populates node displacements so that Kg(first_step=False)   #
-    #         can back-calculate member axial forces via axial strain.     #
+    #         can back-calculate the member end forces.                   #
     # ------------------------------------------------------------------ #
+    if log:
+        print('- Assembling the elastic stiffness matrix')
+
     K_global = model.Ke(combo_name, sparse=True).tocsr()
     K11, K12, K21, K22 = _partition(model, K_global, D1_indices, D2_indices)
 
@@ -198,68 +390,73 @@ def _buckling_analysis_inner(model, combo_name, num_modes):
     FER1, FER2 = _partition(model, model.FER(combo_name), D1_indices, D2_indices)
     P1,   P2   = _partition(model, model.P(combo_name),   D1_indices, D2_indices)
 
+    if log:
+        print(f"- Solving the first-order static problem for '{combo_name}'")
+
     try:
-        D1 = spsolve(K11, P1 - FER1 - K12 @ D2).reshape(-1, 1)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', sp.sparse.linalg.MatrixRankWarning)
+            D1 = spsolve(K11, P1 - FER1 - K12 @ D2).reshape(-1, 1)
     except Exception as exc:
-        raise RuntimeError(f'Static pre-solve failed: {exc}') from exc
+        raise ValueError(
+            f'Static pre-solve failed: {exc}. The model is unstable (a mechanism or rigid body '
+            'motion). For a planar frame without out-of-plane supports, declare the analysis '
+            "plane (e.g. plane='XY') so that the out-of-plane DOFs are restrained."
+        ) from exc
+
+    if not np.all(np.isfinite(D1)):
+        raise ValueError(
+            'Static pre-solve produced non-finite displacements. The model is unstable (a '
+            'mechanism or rigid body motion).'
+        )
 
     combo = model.load_combos[combo_name]
     _store_displacements(model, D1, D2, D1_indices, D2_indices, combo)
 
     # ------------------------------------------------------------------ #
-    # Step 4: Geometric stiffness using axial forces from the static solve #
+    # Step 4: Geometric stiffness using the member forces from the solve  #
     # ------------------------------------------------------------------ #
-    Kg_global = model.Kg(combo_name, first_step=False, sparse=True).tocsr()
-    Kg11, Kg12, Kg21, Kg22 = _partition(model, Kg_global, D1_indices, D2_indices)
+    if log:
+        print('- Assembling the geometric stiffness matrix'
+              + (' (with bending moment terms)' if include_moments else ''))
+
+    Kg_global = model.Kg(combo_name, first_step=False, sparse=True,
+                         include_moments=include_moments).tocsr()
+
+    # The eigenproblem may be restricted to a subset of the free DOFs (e.g. the out-of-plane DOFs)
+    restrained = set(eigen_restrained_dofs)
+    eig_indices = [i for i in D1_indices if i % 6 not in restrained]
+
+    if len(eig_indices) == 0:
+        raise ValueError(
+            'Every free DOF has been excluded from the eigenproblem. Check the analysis plane and '
+            'the `out_of_plane` setting against the model.'
+        )
+
+    K11 = K_global[eig_indices, :][:, eig_indices]
+    Kg11 = Kg_global[eig_indices, :][:, eig_indices]
 
     # ------------------------------------------------------------------ #
     # Step 5: Eigenvalue solve                                             #
     #                                                                      #
     # Reformulate  K φ = λ (−Kg) φ  as  (−Kg) φ = μ K φ  where μ = 1/λ. #
-    #                                                                      #
-    # Now K is the M-matrix (symmetric positive definite — always valid    #
-    # for eigsh) and −Kg is the A-matrix (symmetric, may be indefinite).   #
-    # eigsh with which='LA' finds the largest μ → smallest positive λ.     #
-    # No epsilon regularisation is needed.                                 #
+    # K is the M-matrix (symmetric positive definite) and −Kg is the      #
+    # A-matrix (symmetric, may be indefinite). The largest algebraic μ    #
+    # is the smallest positive λ.                                          #
     # ------------------------------------------------------------------ #
     neg_Kg11 = (-Kg11).tocsr()
 
-    if neg_Kg11.nnz == 0:
+    if neg_Kg11.nnz == 0 or np.max(np.abs(neg_Kg11.data)) == 0.0:
         raise ValueError(
-            'The geometric stiffness matrix is zero — no member has a '
-            'non-zero axial force under combo_name. '
-            'Ensure compressive loads are applied before calling '
-            'buckling_analysis().'
+            'The geometric stiffness matrix is zero — no member carries an axial force or bending '
+            f"moment under '{combo_name}' on the degrees of freedom of the eigenproblem. Ensure "
+            'loads are applied before calling the buckling analysis.'
         )
 
-    n = K11.shape[0]
-    # Request extra modes to improve convergence; trim to num_modes later
-    k = min(max(num_modes, 2 * num_modes), n - 1)
+    if log:
+        print('- Solving the eigenvalue problem')
 
-    try:
-        # Use a deterministic starting vector to ensure reproducible results
-        rng = np.random.RandomState(42)
-        v0 = rng.rand(n)
-        # Solve (-Kg) φ = μ K φ  for the largest algebraic μ.
-        # M = K11 is SPD, so eigsh is valid even though A = -Kg11 is indefinite.
-        eigenvalues_mu, eigenvectors = eigsh(
-            neg_Kg11, k=k, M=K11, which='LA', v0=v0,
-            maxiter=k * 40,
-        )
-    except ArpackNoConvergence as exc:
-        # Use the converged eigenvalues/vectors even if not all converged
-        eigenvalues_mu = exc.eigenvalues
-        eigenvectors = exc.eigenvectors
-        if len(eigenvalues_mu) == 0:
-            raise RuntimeError(
-                'Eigenvalue solve failed: no eigenvalues converged. '
-                'Check that the structure has members under compression.'
-            ) from exc
-    except Exception as exc:
-        raise RuntimeError(
-            f'Eigenvalue solve failed: {exc}. '
-            'Check that the structure has members under compression.'
-        ) from exc
+    eigenvalues_mu, eigenvectors, solver = _solve_buckling_eigenproblem(neg_Kg11, K11, num_modes)
 
     # ------------------------------------------------------------------ #
     # Step 6: Convert μ → λ, filter positive, sort ascending              #
@@ -267,32 +464,130 @@ def _buckling_analysis_inner(model, combo_name, num_modes):
     # Keep only safely positive μ values. Very small positive values can
     # occur for nullspace/near-nullspace modes and are not safe to invert.
     mu_scale = np.max(np.abs(eigenvalues_mu)) if len(eigenvalues_mu) else 0.0
-    mu_tol = max(1e-12, np.finfo(float).eps * max(1.0, mu_scale))
-    pos_mask      = eigenvalues_mu > mu_tol
+    mu_tol = max(1e-12, np.finfo(float).eps*max(1.0, mu_scale))
+    pos_mask = eigenvalues_mu > mu_tol
     eigenvalues_mu = eigenvalues_mu[pos_mask]
-    eigenvectors   = eigenvectors[:, pos_mask]
+    eigenvectors = eigenvectors[:, pos_mask]
 
     # Convert μ = 1/λ  →  λ = 1/μ, then discard any non-finite results as
     # a final safeguard against numerical issues.
-    eigenvalues = 1.0 / eigenvalues_mu
+    eigenvalues = 1.0/eigenvalues_mu
     finite_mask = np.isfinite(eigenvalues)
     eigenvalues = eigenvalues[finite_mask]
     eigenvectors = eigenvectors[:, finite_mask]
 
-    order        = np.argsort(eigenvalues)
-    eigenvalues  = eigenvalues[order][:num_modes]
+    order = np.argsort(eigenvalues)
+    eigenvalues = eigenvalues[order][:num_modes]
     eigenvectors = eigenvectors[:, order][:, :num_modes]
 
+    # ------------------------------------------------------------------ #
+    # Step 7: Normalise the mode shapes and store them on the model       #
+    # ------------------------------------------------------------------ #
+    # Scale each mode to a largest component of 1 (an eigenvector's scale is arbitrary), then give
+    # it a deterministic sign so that repeated runs and renumbered models agree
+    peaks = np.max(np.abs(eigenvectors), axis=0)
+    peaks[peaks == 0.0] = 1.0
+    eigenvectors = eigenvectors/peaks
+    fix_mode_shape_signs(eigenvectors, model._dof_coordinates(eig_indices))
+
+    # Position of each eigenproblem DOF within the model's free DOFs
+    position = {dof: k for k, dof in enumerate(D1_indices)}
+    rows = [position[dof] for dof in eig_indices]
+
+    for i in range(eigenvalues.size):
+
+        mode_combo_name = f'Buckling Mode {i + 1}'
+        model.add_load_combo(mode_combo_name, {}, ['buckling'])
+
+        # Expand the mode shape onto all free DOFs (zero on the DOFs excluded from the eigenproblem)
+        D1_mode = zeros((len(D1_indices), 1))
+        D1_mode[rows, 0] = eigenvectors[:, i]
+
+        # Supports and enforced displacements take no part in a mode shape
+        _store_displacements(model, D1_mode, zeros(D2.shape), D1_indices, D2_indices,
+                             model.load_combos[mode_combo_name])
+
     model.solution = 'Buckling'
+
+    if log:
+        print(f'- Found {eigenvalues.size} of {num_modes} requested modes')
 
     return BucklingResults(
         load_multipliers=eigenvalues,
         mode_shapes=eigenvectors,
         combo_name=combo_name,
-        _model=model,
-        _D1_indices=D1_indices,
-        _D2_indices=D2_indices,
+        free_dof_indices=np.asarray(eig_indices),
+        dof_map=model._dof_map(eig_indices),
+        analysis_model=model,
+        include_moments=include_moments,
+        solver=solver,
+        requested_modes=num_modes,
     )
+
+
+def _solve_buckling_eigenproblem(neg_Kg11, K11, num_modes: int, dense_limit: int = 1500):
+    """Solves `(−Kg) φ = μ K φ` for the largest algebraic μ.
+
+    Small problems are solved densely with LAPACK, which returns every eigenpair and cannot fail to
+    converge. Larger problems use ARPACK's `eigsh` with `K` as the (positive definite) M-matrix,
+    requesting extra modes to help convergence.
+
+    :param neg_Kg11: The negated geometric stiffness matrix on the eigenproblem DOFs (sparse).
+    :param K11: The elastic stiffness matrix on the eigenproblem DOFs (sparse).
+    :param num_modes: The number of buckling modes wanted.
+    :param dense_limit: Problems with at most this many DOFs are solved densely. Defaults to 1500.
+    :return: The eigenvalues μ, the eigenvectors (one per column) and the solver name
+    :rtype: tuple[np.ndarray, np.ndarray, str]
+    """
+
+    n = K11.shape[0]
+
+    if n <= dense_limit:
+
+        try:
+            eigenvalues_mu, eigenvectors = sp.linalg.eigh(neg_Kg11.toarray(), K11.toarray())
+        except Exception as exc:
+            raise RuntimeError(
+                f'Eigenvalue solve failed: {exc}. The elastic stiffness matrix may not be positive '
+                'definite (the model may be unstable).'
+            ) from exc
+
+        return eigenvalues_mu, eigenvectors, 'dense'
+
+    # Request extra modes to improve convergence; trim to num_modes later
+    k = min(2*num_modes, n - 1)
+
+    try:
+        # Use a deterministic starting vector to ensure reproducible results
+        rng = np.random.RandomState(42)
+        v0 = rng.rand(n)
+        # M = K11 is SPD, so eigsh is valid even though A = -Kg11 is indefinite.
+        eigenvalues_mu, eigenvectors = eigsh(neg_Kg11, k=k, M=K11, which='LA', v0=v0,
+                                             maxiter=k*40)
+    except ArpackNoConvergence as exc:
+        # Use the converged eigenvalues/vectors even if not all converged
+        eigenvalues_mu = exc.eigenvalues
+        eigenvectors = exc.eigenvectors
+        if len(eigenvalues_mu) == 0:
+            raise RuntimeError(
+                'Eigenvalue solve failed: no eigenvalues converged. '
+                'Check that the structure has members under compression or bending.'
+            ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f'Eigenvalue solve failed: {exc}. '
+            'Check that the structure has members under compression or bending.'
+        ) from exc
+
+    return eigenvalues_mu, eigenvectors, 'sparse'
+
+
+def _set_force_timoshenko(model: FEModel3D, value: bool) -> None:
+    """Set _force_timoshenko on all sub-members (and physical members) in the model."""
+    for phys_member in model.members.values():
+        phys_member._force_timoshenko = value
+        for sub_member in phys_member.sub_members.values():
+            sub_member._force_timoshenko = value
 
 
 def _prepare_model(model: FEModel3D, n_modes: int = 0) -> None:
@@ -319,8 +614,9 @@ def _prepare_model(model: FEModel3D, n_modes: int = 0) -> None:
         # Create and add a default load combination to the dictionary of load combinations
         model.load_combos['Combo 1'] = LoadCombo('Combo 1', factors={'Case 1':1.0})
 
-    # Remove any modal load combinations from prior modal analyses
-    to_remove = [name for name, combo in model.load_combos.items() if combo.combo_tags != None and 'modal' in combo.combo_tags]
+    # Remove any modal or buckling load combinations from prior eigenvalue analyses
+    to_remove = [name for name, combo in model.load_combos.items()
+                 if combo.combo_tags != None and ('modal' in combo.combo_tags or 'buckling' in combo.combo_tags)]
     for name in to_remove:
         model.load_combos.pop(name)
 
@@ -357,7 +653,7 @@ def _prepare_model(model: FEModel3D, n_modes: int = 0) -> None:
     _renumber(model)
 
 
-def _identify_combos(model: FEModel3D, combo_tags: List[str] | None = None) -> List[LoadCombo]:
+def _identify_combos(model: FEModel3D, combo_tags: list[str] | None = None) -> list[LoadCombo]:
     """Returns a list of load combinations that are to be run based on tags given by the user.
 
     :param model: The model being analyzed.
@@ -519,7 +815,7 @@ def _solve_unknown_disp(K11, rhs, sparse: bool = True, check_stability: bool = T
     return x
 
 
-def _first_order(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArray[float64], D1_indices: List[int], D2_indices: List[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, max_iter: int = 30, spring_tolerance: float = 0, member_tolerance: float = 0, num_steps: int = 1) -> None:
+def _first_order(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArray[float64], D1_indices: list[int], D2_indices: list[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, max_iter: int = 30, spring_tolerance: float = 0, member_tolerance: float = 0, num_steps: int = 1) -> None:
     """Performs the shared first-order elastic/tension-compression-only solution path.
 
     This helper is used by both ``FEModel3D.analyze`` and pushover preload so the normal
@@ -604,7 +900,7 @@ def _first_order(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: 
     model.solution = 'Nonlinear TC'
 
 
-def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArray[float64], D1_indices: List[int], D2_indices: List[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, max_iter: int = 30) -> None:
+def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArray[float64], D1_indices: list[int], D2_indices: list[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, max_iter: int = 30) -> None:
     """Performs second order (P-Delta) analysis. This type of analysis is appropriate for most models using beams, columns and braces. Second order analysis is usually required by material-specific codes. Models with slender members and/or members with combined bending and axial loads will generally have more significant P-Delta effects. P-Delta effects in plates/quads are not considered by Pynite at this time.
 
     :param model: The finite element model to be solved.
@@ -749,19 +1045,49 @@ def _PDelta(model: FEModel3D, combo_name: str, P1: NDArray[float64], FER1: NDArr
     model.solution = 'P-Delta'
 
 
-def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num: int, Delta_P1: NDArray[float64], Delta_FER1: NDArray[float64], Delta_FER2: NDArray[float64], D1_indices: List[int], D2_indices: List[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, tol: float = 0, P_Delta: bool = False, max_iter: int = 30) -> None:
+def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num: int, Delta_P1: NDArray[float64], Delta_FER1: NDArray[float64], Delta_FER2: NDArray[float64], D1_indices: list[int], D2_indices: list[int], D2: NDArray[float64], log: bool = True, sparse: bool = True, check_stability: bool = False, tol: float = 0, P_Delta: bool = False, max_iter: int = 30) -> float:
+    """Apply one trial pushover increment and retry it until the step is valid.
+
+    The trial state is checked for tension/compression-only status changes, plastic
+    load reversals, and yield-surface overshoot. Invalid trials are rolled back and
+    the increment is reduced before the step is solved again. A valid trial commits
+    its displacement and nonlinear member-force changes.
+
+    :param model: The finite-element model being analyzed.
+    :param combo_name: The primary load combination receiving the increment.
+    :param push_combo: The load combination defining the pushover pattern.
+    :param step_num: The current pushover step number.
+    :param Delta_P1: Partitioned unknown-DOF nodal force increment.
+    :param Delta_FER1: Partitioned unknown-DOF fixed-end reaction increment.
+    :param Delta_FER2: Partitioned known-DOF fixed-end reaction increment.
+    :param D1_indices: Global indices of the unknown degrees of freedom.
+    :param D2_indices: Global indices of the known degrees of freedom.
+    :param D2: Known/enforced displacement vector.
+    :param log: Whether to print progress messages. Defaults to ``True``.
+    :param sparse: Whether to use sparse matrix operations. Defaults to ``True``.
+    :param check_stability: Whether to check stiffness-matrix stability.
+    :param tol: Tolerance for tension/compression-only convergence checks.
+    :param P_Delta: Whether to include geometric stiffness effects.
+    :param max_iter: Maximum number of retries allowed for this step.
+    :return: Fraction of the requested increment accepted after cutbacks.
+    :raises RuntimeError: If the step exceeds ``max_iter`` retries.
+    :raises ValueError: If the stiffness system is singular.
+    """
 
     # Run at least one iteration
-    run_step = True
     iter_count = 0
     tc_changed_last = False
     reversal_locations_last = []
+    step_ratio = 1.0
 
     # Run/rerun the load step until convergence occurs
-    while run_step == True:
+    while True:
 
+        # Ensure the maximum number of pushover iterations has not been exceeded on this load step
         iter_count += 1
         if iter_count > max_iter:
+
+            # List the reasons for the pushover load step not converging
             reasons = []
             if tc_changed_last:
                 reasons.append('tension/compression-only status changes')
@@ -769,6 +1095,8 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
                 reasons.append('plastic load reversal at ' + ', '.join(reversal_locations_last))
             if not reasons:
                 reasons.append('non-convergent step validation checks')
+
+            # Raise an error indicating that the pushover load step did not converge
             raise RuntimeError(
                 f"Pushover load step {step_num} for load combination '{combo_name}' did not converge "
                 f"after {max_iter} retries ({'; '.join(reasons)}). "
@@ -780,6 +1108,7 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
         if sparse == True:
 
             from scipy.sparse.linalg import spsolve
+
 
             # Calculate the elastic stiffness matrix
             if log: print('- Calculating elastic stiffness matrix [Ke]')
@@ -794,17 +1123,18 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
             # performs matrix addition on `csr` matrices.
             K11 = Ke11.tocsr() + Km11.tocsr()
             K12 = Ke12.tocsr() + Km12.tocsr()
-            # K21 = Ke21.tocsr() + Km21.tocsr()  # This matrix is not used
-            # K22 = Ke22.tocsr() + Km22.tocsr()  # This matrix is not used
+            # K21 = Ke21.tocsr() + Km21.tocsr()  # This matrix is not used, but kept for theoretical completeness
+            # K22 = Ke22.tocsr() + Km22.tocsr()  # This matrix is not used, but kept for theoretical completeness
 
+            # Check if the user has requested the inclusion of geometric stiffness due to P-Delta effects
             if P_Delta:
                 # The `combo_name` variable in the code below is not the name of the pushover load combination. Rather it is the name of the primary combination that the pushover load will be added to. Axial loads used to develop Kg are calculated from the displacements stored in `combo_name`.
                 if log: print('- Calculating geometric stiffness matrix [Kg]')
                 Kg11, Kg12, Kg21, Kg22 = _partition(model, model.Kg(combo_name, log, sparse, False), D1_indices, D2_indices)
                 K11 = K11 + Kg11.tocsr()
                 K12 = K12 + Kg12.tocsr()
-                # K21 = K21 + Kg21.tocsr()  # This matrix is not used
-                # K22 = K22 + Kg22.tocsr()  # This matrix is not used
+                # K21 = K21 + Kg21.tocsr()  # This matrix is not used, but kept for theoretical completeness
+                # K22 = K22 + Kg22.tocsr()  # This matrix is not used, but kept for theoretical completeness
 
         # Dense solver
         else:
@@ -819,17 +1149,18 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
 
             K11 = Ke11 + Km11
             K12 = Ke12 + Km12
-            # K21 = Ke21 + Km21  # This matrix is not used
-            # K22 = Ke22 + Km22  # This matrix is not used
+            # K21 = Ke21 + Km21  # This matrix is not used, but kept for theoretical completeness
+            # K22 = Ke22 + Km22  # This matrix is not used, but kept for theoretical completeness
 
+            # Check if the user has requested the inclusion of geometric stiffness due to P-Delta effects
             if P_Delta:
                 # The `combo_name` variable in the code below is not the name of the pushover load combination. Rather it is the name of the primary combination that the pushover load will be added to. Axial loads used to develop Kg are calculated from the displacements stored in `combo_name`.
                 if log: print('Calculating geometric stiffness matrix [Kg]')
                 Kg11, Kg12, Kg21, Kg22 = _partition(model, model.Kg(combo_name, log, sparse, False), D1_indices, D2_indices)
                 K11 = K11 + Kg11
                 K12 = K12 + Kg12
-                # K21 = K21 + Kg21  # This matrix is not used
-                # K22 = K22 + Kg22  # This matrix is not used
+                # K21 = K21 + Kg21  # This matrix is not used, but kept for theoretical completeness
+                # K22 = K22 + Kg22  # This matrix is not used, but kept for theoretical completeness
 
         # Calculate the changes to the global displacement vector
         if log: print('- Calculating changes to the global displacement vector')
@@ -842,12 +1173,12 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
                 if sparse == True:
                     # The partitioned stiffness matrix is already in `csr` format. The `@`
                     # operator performs matrix multiplication on sparse matrices.
-                    Delta_D1 = spsolve(K11.tocsr(), subtract(subtract(Delta_P1, Delta_FER1), K12.tocsr() @ D2))
+                    Delta_D1 = spsolve(K11.tocsr(), subtract(subtract(step_ratio*Delta_P1, step_ratio*Delta_FER1), K12.tocsr() @ D2))
                     Delta_D1 = Delta_D1.reshape(len(Delta_D1), 1)
                 else:
                     # The partitioned stiffness matrix is in `csr` format. It will be
                     # converted to a 2D dense array for mathematical operations.
-                    Delta_D1 = solve(K11, subtract(subtract(Delta_P1, Delta_FER1), K12 @ D2))
+                    Delta_D1 = solve(K11, subtract(subtract(step_ratio*Delta_P1, step_ratio*Delta_FER1), K12 @ D2))
 
             except:
                 # Return out of the method if 'K' is singular and provide an error message
@@ -871,11 +1202,13 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
         Delta_D = _unpartition(model, Delta_D1, D2, D1_indices, D2_indices)
         Delta_FER = _unpartition(model, Delta_FER1, Delta_FER2, D1_indices, D2_indices)
 
-        # Step through each member in the model and check for plastic load reversal.
+        # Step through each physical member in the model
         for phys_member in model.members.values():
 
+            # Step through each submember in each physical member
             for sub_member in phys_member.sub_members.values():
 
+                # Find the magnitudes of the plastic deformation
                 lamb = sub_member.lamb(Delta_D, combo_name, push_combo, step_num)
 
                 # Check for plastic load reversal at the i-node in this load step
@@ -906,54 +1239,58 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
 
                     sub_member.j_reversal = False
 
-        # Check if this iteration was valid
+                # Extract the change in the global displacement and fixed end reaction vectors
+                # for this member from the full global vectors. The `reshape` method is used to
+                # ensure these are column vectors for the matrix operations below.
+                Delta_D_member = array([Delta_D[sub_member.i_node.ID*6 + 0, 0],
+                                        Delta_D[sub_member.i_node.ID*6 + 1, 0],
+                                        Delta_D[sub_member.i_node.ID*6 + 2, 0],
+                                        Delta_D[sub_member.i_node.ID*6 + 3, 0],
+                                        Delta_D[sub_member.i_node.ID*6 + 4, 0],
+                                        Delta_D[sub_member.i_node.ID*6 + 5, 0],
+                                        Delta_D[sub_member.j_node.ID*6 + 0, 0],
+                                        Delta_D[sub_member.j_node.ID*6 + 1, 0],
+                                        Delta_D[sub_member.j_node.ID*6 + 2, 0],
+                                        Delta_D[sub_member.j_node.ID*6 + 3, 0],
+                                        Delta_D[sub_member.j_node.ID*6 + 4, 0],
+                                        Delta_D[sub_member.j_node.ID*6 + 5, 0]]).reshape(12, 1)
+                
+                Delta_FER_member = array([Delta_FER[sub_member.i_node.ID*6 + 0, 0],
+                                            Delta_FER[sub_member.i_node.ID*6 + 1, 0],
+                                            Delta_FER[sub_member.i_node.ID*6 + 2, 0],
+                                            Delta_FER[sub_member.i_node.ID*6 + 3, 0],
+                                            Delta_FER[sub_member.i_node.ID*6 + 4, 0],
+                                            Delta_FER[sub_member.i_node.ID*6 + 5, 0],
+                                            Delta_FER[sub_member.j_node.ID*6 + 0, 0],
+                                            Delta_FER[sub_member.j_node.ID*6 + 1, 0],
+                                            Delta_FER[sub_member.j_node.ID*6 + 2, 0],
+                                            Delta_FER[sub_member.j_node.ID*6 + 3, 0],
+                                            Delta_FER[sub_member.j_node.ID*6 + 4, 0],
+                                            Delta_FER[sub_member.j_node.ID*6 + 5, 0]]).reshape(12, 1)
+                
+                # Convert the global displacement and fixed end reaction vectors to local
+                # member vectors
+                Delta_d = sub_member.T() @ Delta_D_member
+                Delta_fer = sub_member.T() @ Delta_FER_member
+
+                # Calculate and store the change in the local end force vector for this load step
+                sub_member.df_nonlin[combo_name] = sub_member.f(combo_name, Delta_d, Delta_fer)
+
+        # Check if we overshot the yield curve on this iteration, and by how much
+        tau = _load_step_ratio(model, combo_name)
+        if round(tau, 3) < 1.0:
+            step_ratio *= tau
+            run_step = True
+
+        # Check if the load step needs to be rerun due to load reversal, tension/compression-only
+        # status changes, or overshooting the yield curve.
         if run_step == False:
 
-            # Step through each physical member in the model
+            # Store the change in the local end force vector for this load step.
             for phys_member in model.members.values():
-
-                # Step through each sub-member of the physical member
                 for sub_member in phys_member.sub_members.values():
-
-                    # Extract the change in the global displacement and fixed end reaction vectors for this member from the full global vectors. The `reshape` method is used to ensure these are column vectors for the matrix operations below.
-                    Delta_D_member = array([Delta_D[sub_member.i_node.ID*6 + 0, 0],
-                                            Delta_D[sub_member.i_node.ID*6 + 1, 0],
-                                            Delta_D[sub_member.i_node.ID*6 + 2, 0],
-                                            Delta_D[sub_member.i_node.ID*6 + 3, 0],
-                                            Delta_D[sub_member.i_node.ID*6 + 4, 0],
-                                            Delta_D[sub_member.i_node.ID*6 + 5, 0],
-                                            Delta_D[sub_member.j_node.ID*6 + 0, 0],
-                                            Delta_D[sub_member.j_node.ID*6 + 1, 0],
-                                            Delta_D[sub_member.j_node.ID*6 + 2, 0],
-                                            Delta_D[sub_member.j_node.ID*6 + 3, 0],
-                                            Delta_D[sub_member.j_node.ID*6 + 4, 0],
-                                            Delta_D[sub_member.j_node.ID*6 + 5, 0]]).reshape(12, 1)
-                    
-                    Delta_FER_member = array([Delta_FER[sub_member.i_node.ID*6 + 0, 0],
-                                              Delta_FER[sub_member.i_node.ID*6 + 1, 0],
-                                              Delta_FER[sub_member.i_node.ID*6 + 2, 0],
-                                              Delta_FER[sub_member.i_node.ID*6 + 3, 0],
-                                              Delta_FER[sub_member.i_node.ID*6 + 4, 0],
-                                              Delta_FER[sub_member.i_node.ID*6 + 5, 0],
-                                              Delta_FER[sub_member.j_node.ID*6 + 0, 0],
-                                              Delta_FER[sub_member.j_node.ID*6 + 1, 0],
-                                              Delta_FER[sub_member.j_node.ID*6 + 2, 0],
-                                              Delta_FER[sub_member.j_node.ID*6 + 3, 0],
-                                              Delta_FER[sub_member.j_node.ID*6 + 4, 0],
-                                              Delta_FER[sub_member.j_node.ID*6 + 5, 0]]).reshape(12, 1)
-                    
-                    # Convert the global displacement and fixed end reaction vectors to local member vectors
-                    Delta_d = sub_member.T() @ Delta_D_member
-                    Delta_fer = sub_member.T() @ Delta_FER_member
-
-                    # Calculate change in the local end force vector for this load step
-                    Delta_f = sub_member.f(combo_name, Delta_d, Delta_fer)
-
-                    # TODO: Before accepting `Delta_f`, check if we've overshot any member section
-                    # capacity interaction curves, and adjust the load step if necessary
-
                     # Store the change in the local end force vector for this load step
-                    sub_member.f_nonlin[combo_name] += Delta_f.reshape(12)
+                    sub_member.f_nonlin[combo_name] += sub_member.df_nonlin[combo_name].reshape(12)
 
         else:
 
@@ -970,11 +1307,15 @@ def _pushover_step(model: FEModel3D, combo_name: str, push_combo: str, step_num:
                 else:
                     print('- Restarting load step due to plastic load reversal')
 
+        # Exit the main loop if the load step does not need to be rerun
+        if run_step == False:
+            break
+    
+    return step_ratio
 
-def _load_step_ratio(model: FEModel3D, combo_name: str, Delta_f: NDArray[float64]) -> float:
+
+def _load_step_ratio(model: FEModel3D, combo_name: str) -> float:
     """
-    Determines the fraction of the pushover load step that should be applied.
-
     It is desirable to ensure plastic hinges occur at the end of a load step. This method checks
     if the current load step has caused any plastic hinges to form. If so, it calculates the
     fraction of the load step that should be applied to ensure the hinge forms at the end of the
@@ -984,46 +1325,46 @@ def _load_step_ratio(model: FEModel3D, combo_name: str, Delta_f: NDArray[float64
     """
     
     # Define a local helper method for this method
-    def tal(p, my, mz, dp, dmy, dmz, Phi):
+    def tau(p, my, mz, dp, dmy, dmz, Phi):
 
         # Initial guesses
-        tal_l = 0.0  # Lower bound guess
-        tal_u = 1.0  # Upper bound guess
-        tal_r = tal_u  # Assumed initial value of the root we are seeking
+        tau_l = 0.0  # Lower bound guess
+        tau_u = 1.0  # Upper bound guess
+        tau_r = tau_u  # Assumed initial value of the root we are seeking
 
         # Counter variable
         num_iter = 0
 
-        while (not isclose(Phi(p + tal_r*dp, my + tal_r*dmy, mz + tal_r*dmz) - 1.0, 0.0) 
+        while (not isclose(Phi(p + tau_r*dp, my + tau_r*dmy, mz + tau_r*dmz) - 1.0, 0.0, abs_tol=1e-9) 
                and num_iter < 100):
 
             # Increment the iteration counter
             num_iter += 1
 
             # Calculate `Phi` (the utilization ratio) for the lower and upper guesses
-            Phi_tal_l = Phi(p + tal_l*dp, my + tal_l*dmy, mz + tal_l*dmz)
-            Phi_tal_u = Phi(p + tal_u*dp, my + tal_u*dmy, mz + tal_u*dmz)
+            Phi_tau_l = Phi(p + tau_l*dp, my + tau_l*dmy, mz + tau_l*dmz)
+            Phi_tau_u = Phi(p + tau_u*dp, my + tau_u*dmy, mz + tau_u*dmz)
 
             # Estimate the root and its `Phi` value
-            tal_r = 1 - (Phi_tal_u - 1.0)*(tal_l - tal_u)/(Phi_tal_l - Phi_tal_u)
-            Phi_tal_r = Phi(p + tal_r*dp, my + tal_r*dmy, mz + tal_r*dmz)
+            tau_r = 1 - (Phi_tau_u - 1.0)*(tau_l - tau_u)/(Phi_tau_l - Phi_tau_u)
+            Phi_tau_r = Phi(p + tau_r*dp, my + tau_r*dmy, mz + tau_r*dmz)
 
             # Replace the lower or upper guess with the new estimate depending on which (Phi - 1)
             # one has the same sign as (Phi - 1) for the new root estimate.
-            if (Phi_tal_l - 1.0)*(Phi_tal_r - 1.0) < 0:
-                tal_u = tal_r
-            elif (Phi_tal_u - 1.0)*(Phi_tal_r - 1.0) < 0:
-                tal_l = tal_r
+            if (Phi_tau_l - 1.0)*(Phi_tau_r - 1.0) < 0:
+                tau_u = tau_r
+            elif (Phi_tau_u - 1.0)*(Phi_tau_r - 1.0) < 0:
+                tau_l = tau_r
 
             # Cap the number of iterations to avoid infinite loops
             if num_iter >= 100:
                 raise Exception('Unable to determine the fraction of the pushover load step that should be applied.')
 
         # Return the fraction of the pushover load step that should be applied
-        return tal_r
+        return tau_r
     
     # Initilize the lowest value for the fraction of the pushover load step that should be applied
-    tal_min = 1.0
+    tau_min = 1.0
 
     # Step through each physical member in the model
     for phys_member in model.members.values():
@@ -1033,59 +1374,87 @@ def _load_step_ratio(model: FEModel3D, combo_name: str, Delta_f: NDArray[float64
             
             # Obtain the member's plastic load capacities
             section = sub_member.section
-            Py = section.material.fy*section.A
-            Mpy = section.material.fy*section.Zy
-            Mpz = section.material.fy*section.Zz
+            Py = section.material.fy*section.A  # noqa: F841
+            Mpy = section.material.fy*section.Zy  # noqa: F841
+            Mpz = section.material.fy*section.Zz  # noqa: F841
 
-            # Obtain member end forces for the latest load step
-            fxi = sub_member.f_nonlin[combo_name][0]
-            myi = sub_member.f_nonlin[combo_name][4]
-            mzi = sub_member.f_nonlin[combo_name][5]
-            fxj = sub_member.f_nonlin[combo_name][6]
-            myj = sub_member.f_nonlin[combo_name][10]
-            mzj = sub_member.f_nonlin[combo_name][11]
+            # Obtain member end forces prior to the current load step. These may arrive as
+            # 1x1 arrays from the nonlinear history bookkeeping, but the section yield function
+            # expects scalar force values.
+            fxi = float(asarray(sub_member.f_nonlin[combo_name][0]).reshape(-1)[0])
+            myi = float(asarray(sub_member.f_nonlin[combo_name][4]).reshape(-1)[0])
+            mzi = float(asarray(sub_member.f_nonlin[combo_name][5]).reshape(-1)[0])
+            fxj = float(asarray(sub_member.f_nonlin[combo_name][6]).reshape(-1)[0])
+            myj = float(asarray(sub_member.f_nonlin[combo_name][10]).reshape(-1)[0])
+            mzj = float(asarray(sub_member.f_nonlin[combo_name][11]).reshape(-1)[0])
 
-            # Check if the yield surface has been exceeded at the i-end of the member
-            if sub_member.section.Phi(fxi, myi, mzi) > 1.0:
+            # Obtain member end forces after the current load step
+            dfxi = float(asarray(sub_member.df_nonlin[combo_name][0]).reshape(-1)[0])
+            dmyi = float(asarray(sub_member.df_nonlin[combo_name][4]).reshape(-1)[0])
+            dmzi = float(asarray(sub_member.df_nonlin[combo_name][5]).reshape(-1)[0])
+            dfxj = float(asarray(sub_member.df_nonlin[combo_name][6]).reshape(-1)[0])
+            dmyj = float(asarray(sub_member.df_nonlin[combo_name][10]).reshape(-1)[0])
+            dmzj = float(asarray(sub_member.df_nonlin[combo_name][11]).reshape(-1)[0])
 
-                # Convert the member end forces to nondiminensionalized values
-                p = abs(fxi/Py)
-                m_y = abs(myi/Mpy)
-                m_z = abs(mzi/Mpz)
+            # Check whether the tentative end-of-step force state exceeds the yield surface.
+            # The prior state may already be elastic, but the current step may overshoot the
+            # surface; in that case we determine the fraction of the step that reaches yield exactly.
+            fxi_trial = fxi + dfxi
+            myi_trial = myi + dmyi
+            mzi_trial = mzi + dmzi
 
-                dp = abs(Delta_f[0, 0]/Py)
-                dmy = abs(Delta_f[4, 0]/Mpy)
-                dmz = abs(Delta_f[5, 0]/Mpz)
+            if (sub_member.section.Phi(fxi, myi, mzi) < 1.0
+                and not isclose(sub_member.section.Phi(fxi, myi, mzi), 1.0, abs_tol=1e-8)
+                and sub_member.section.Phi(fxi_trial, myi_trial, mzi_trial) > 1.0):
 
-                tal_i = tal(p, m_y, m_z, dp, dmy, dmz, sub_member.section.Phi)
+                # `Section.Phi` expects dimensional force values, not normalized ratios, so the
+                # root search must operate on the actual force path of the current increment.
+                p = abs(fxi)
+                m_y = abs(myi)
+                m_z = abs(mzi)
 
-            else: tal_i = 1.0
+                dp = abs(dfxi)
+                dmy = abs(dmyi)
+                dmz = abs(dmzi)
+
+                tau_i = tau(p, m_y, m_z, dp, dmy, dmz, sub_member.section.Phi)
+
+            else:
+                tau_i = 1.0
 
             # Check if the yield surface has been exceeded at the j-end of the member
-            if sub_member.section.Phi(fxj, myj, mzj) > 1.0:
+            fxj_trial = fxj + dfxj
+            myj_trial = myj + dmyj
+            mzj_trial = mzj + dmzj
 
-                # Convert the member end forces to nondiminensionalized values
-                p = abs(fxj/Py)
-                m_y = abs(myj/Mpy)
-                m_z = abs(mzj/Mpz)
+            if (sub_member.section.Phi(fxj, myj, mzj) < 1.0
+                and not isclose(sub_member.section.Phi(fxj, myj, mzj), 1.0, abs_tol=1e-8)
+                and sub_member.section.Phi(fxj_trial, myj_trial, mzj_trial) > 1.0):
 
-                dp = abs(Delta_f[6, 0]/Py)
-                dmy = abs(Delta_f[10, 0]/Mpy)
-                dmz = abs(Delta_f[11, 0]/Mpz)
+                # `Section.Phi` expects dimensional force values, not normalized ratios, so the
+                # root search must operate on the actual force path of the current increment.
+                p = abs(fxj)
+                m_y = abs(myj)
+                m_z = abs(mzj)
 
-                tal_j = tal(p, m_y, m_z, dp, dmy, dmz, sub_member.section.Phi)
+                dp = abs(dfxj)
+                dmy = abs(dmyj)
+                dmz = abs(dmzj)
 
-            else: tal_j = 1.0
+                tau_j = tau(p, m_y, m_z, dp, dmy, dmz, sub_member.section.Phi)
 
-            if tal_i < tal_min:
-                tal_min = tal_i
-            if tal_j < tal_min:
-                tal_min = tal_j
+            else:
+                tau_j = 1.0
+
+            if tau_i < tau_min:
+                tau_min = tau_i
+            if tau_j < tau_min:
+                tau_min = tau_j
 
     # Return the fraction of the pushover load step that should be applied
-    return tal_min
+    return tau_min
 
-def _unpartition(model: FEModel3D, V1: NDArray[float64], V2: NDArray[float64], V1_indices: List[int], V2_indices: List[int]) -> NDArray[float64]:
+def _unpartition(model: FEModel3D, V1: NDArray[float64], V2: NDArray[float64], V1_indices: list[int], V2_indices: list[int]) -> NDArray[float64]:
     """Unpartitions a vector and returns it as a global vector including all dofs.
 
     :param model: The finite element model being evaluated
@@ -1122,7 +1491,7 @@ def _unpartition(model: FEModel3D, V1: NDArray[float64], V2: NDArray[float64], V
     return V
 
 
-def _store_displacements(model: FEModel3D, D1: NDArray[float64], D2: NDArray[float64], D1_indices: List[int], D2_indices: List[int], combo: LoadCombo) -> None:
+def _store_displacements(model: FEModel3D, D1: NDArray[float64], D2: NDArray[float64], D1_indices: list[int], D2_indices: list[int], combo: LoadCombo) -> None:
     """Stores calculated displacements from the solver into the model's displacement vector `_D` and into each node object in the model
 
     :param model: The finite element model being evaluated.
@@ -1158,7 +1527,7 @@ def _store_displacements(model: FEModel3D, D1: NDArray[float64], D2: NDArray[flo
             node.RZ[combo.name] = D[node.ID*6 + 5, 0]
 
 
-def _sum_displacements(model: FEModel3D, Delta_D1: NDArray[float64], Delta_D2: NDArray[float64], D1_indices: List[int], D2_indices: List[int], combo: LoadCombo) -> None:
+def _sum_displacements(model: FEModel3D, Delta_D1: NDArray[float64], Delta_D2: NDArray[float64], D1_indices: list[int], D2_indices: list[int], combo: LoadCombo) -> None:
     """Sums calculated displacements for a load step from the solver into the model's displacement vector `_D` and into each node object in the model.
 
     :param model: The finite element model being evaluated.
@@ -1210,9 +1579,9 @@ def _check_TC_convergence(model: FEModel3D, combo_name: str = "Combo 1", log: bo
         tension-only member is active but has a maximum axial force greater than the
         `member_tolerance` (indicating compression), or if a compression-only member is active
         but has a minimum axial force less than `-member_tolerance` (indicating tension),
-        that physical member and all its sub-members are deactivated. This action
-        flags the analysis as not converged. A future enhancement is noted to allow elements to
-        reactivate if deformations indicate they should return to an active state.
+        that physical member and all its sub-members are deactivated. Inactive members and
+        springs are reactivated when their local end displacements indicate a force they can
+        resist. Either change flags the analysis as not converged.
     *   **Sub-member Reset**: After checking, the `_solved_combo` flag for all sub-members is
         reset to `None`. This ensures that they will be resegmented and re-evaluated in subsequent
         iterations of the analysis, allowing for further changes as needed for convergence.
@@ -1264,8 +1633,6 @@ def _check_TC_convergence(model: FEModel3D, combo_name: str = "Combo 1", log: bo
                     spring[2] = should_be_active
                     convergence = False
 
-    # TODO: Adjust the code below to allow elements to reactivate on subsequent iterations if deformations at element nodes indicate the member goes back into an active state. This will lead to a less conservative and more realistic analysis. Nodal springs (above) already do this.
-
     # Check tension/compression-only springs
     if log:
         print('- Checking for tension/compression-only spring convergence')
@@ -1286,6 +1653,18 @@ def _check_TC_convergence(model: FEModel3D, combo_name: str = "Combo 1", log: bo
                 if log:
                     print(f'- Deactivating spring {spring.name}')
                 spring.active[combo_name] = False
+                convergence = False
+
+        elif spring.tension_only or spring.comp_only:
+
+            # Spring axial force uses compression-positive sign convention.
+            d = spring.d(combo_name)
+            N = -spring.ks*(d[6, 0] - d[0, 0])
+
+            if (spring.tension_only and N < -spring_tolerance) or (spring.comp_only and N > spring_tolerance):
+                if log:
+                    print(f'- Reactivating spring {spring.name}')
+                spring.active[combo_name] = True
                 convergence = False
 
     # Check tension/compression only members
@@ -1326,6 +1705,24 @@ def _check_TC_convergence(model: FEModel3D, combo_name: str = "Combo 1", log: bo
                 # Flag the analysis as not converged
                 convergence = False
 
+        elif phys_member.tension_only or phys_member.comp_only:
+
+            # Estimate the axial force from the physical member's local end
+            # displacements, using compression-positive sign convention.
+            d = phys_member.d(combo_name)
+            N = -phys_member.section.A*phys_member.material.E/phys_member.L()*(d[6, 0] - d[0, 0])
+
+            if (phys_member.tension_only and N < -member_tolerance) or (phys_member.comp_only and N > member_tolerance):
+
+                if log:
+                    print(f'- Reactivating member {phys_member.name}')
+                phys_member.active[combo_name] = True
+
+                for sub_member in phys_member.sub_members.values():
+                    sub_member.active[combo_name] = True
+
+                convergence = False
+
         # Reset the sub-member's flag to unsolved. This will allow it to resolve for the same load combination after subsequent iterations have made further changes.
         for sub_member in phys_member.sub_members.values():
             sub_member._solved_combo = None
@@ -1334,7 +1731,7 @@ def _check_TC_convergence(model: FEModel3D, combo_name: str = "Combo 1", log: bo
     return convergence
 
 
-def _calc_reactions(model: FEModel3D, log: bool = False, combo_tags: List[str] | None = None) -> None:
+def _calc_reactions(model: FEModel3D, log: bool = False, combo_tags: list[str] | None = None) -> None:
     """
     Calculates reactions internally once the model is solved.
 
@@ -1408,7 +1805,7 @@ def _calc_reactions(model: FEModel3D, log: bool = False, combo_tags: List[str] |
                     # Sum the sub-member end forces at the node
                     for member in phys_member.sub_members.values():
 
-                        if member.i_node == node and phys_member.active[combo.name] == True:
+                        if member.i_node == node:
 
                             # Get the member's global force matrix
                             # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
@@ -1421,7 +1818,7 @@ def _calc_reactions(model: FEModel3D, log: bool = False, combo_tags: List[str] |
                             if node.support_RY: node.RxnMY[combo.name] += member_F[4, 0]
                             if node.support_RZ: node.RxnMZ[combo.name] += member_F[5, 0]
 
-                        elif member.j_node == node and phys_member.active[combo.name] == True:
+                        elif member.j_node == node:
 
                             # Get the member's global force matrix
                             # Storing it as a local variable eliminates the need to rebuild it every time a term is needed
@@ -1591,7 +1988,7 @@ def _calc_reactions(model: FEModel3D, log: bool = False, combo_tags: List[str] |
                 node.RxnMZ[combo.name] -= k*RZ
 
 
-def _check_statics(model: FEModel3D, combo_tags: List[str] | None = None) -> None:
+def _check_statics(model: FEModel3D, combo_tags: list[str] | None = None) -> None:
     '''
     Checks static equilibrium and prints results to the console.
 
@@ -1675,19 +2072,19 @@ def _check_statics(model: FEModel3D, combo_tags: List[str] | None = None) -> Non
             SumRMZ += RMZ - RFX*Y + RFY*X
 
         # Add the results to the table
-        statics_table.add_row([combo.name, '{:.3g}'.format(SumFX), '{:.3g}'.format(SumRFX),
-                                            '{:.3g}'.format(SumFY), '{:.3g}'.format(SumRFY),
-                                            '{:.3g}'.format(SumFZ), '{:.3g}'.format(SumRFZ),
-                                            '{:.3g}'.format(SumMX), '{:.3g}'.format(SumRMX),
-                                            '{:.3g}'.format(SumMY), '{:.3g}'.format(SumRMY),
-                                            '{:.3g}'.format(SumMZ), '{:.3g}'.format(SumRMZ)])
+        statics_table.add_row([combo.name, f'{SumFX:.3g}', f'{SumRFX:.3g}',
+                                            f'{SumFY:.3g}', f'{SumRFY:.3g}',
+                                            f'{SumFZ:.3g}', f'{SumRFZ:.3g}',
+                                            f'{SumMX:.3g}', f'{SumRMX:.3g}',
+                                            f'{SumMY:.3g}', f'{SumRMY:.3g}',
+                                            f'{SumMZ:.3g}', f'{SumRMZ:.3g}'])
 
     # Print the static check table
     print(statics_table)
     print('')
 
 
-def _partition_D(model: FEModel3D) -> Tuple[List[int], List[int], NDArray[float64]]:
+def _partition_D(model: FEModel3D) -> tuple[list[int], list[int], NDArray[float64]]:
     """Builds a list with known nodal displacements and with the positions in global stiffness matrix of known and unknown nodal displacements
 
     :return: A list of the global matrix indices for the unknown nodal displacements (D1_indices). A list of the global matrix indices for the known nodal displacements (D2_indices). A list of the known nodal displacements (D2).
@@ -1773,7 +2170,8 @@ def _partition_D(model: FEModel3D) -> Tuple[List[int], List[int], NDArray[float6
             D2_indices.append(node.ID*6 + 5)
             D2.append(0.0)
 
-    # Legacy code on the next line. I will leave it here until the line that follows has been proven over time.
+    # Legacy code on the next lines. I will leave it here until the line that follows has been proven over time.
+    # from numpy import atleast_2d
     # D2 = atleast_2d(D2)
 
     # Convert D2 from a list to a matrix
@@ -1783,7 +2181,7 @@ def _partition_D(model: FEModel3D) -> Tuple[List[int], List[int], NDArray[float6
     return D1_indices, D2_indices, D2
 
 
-def _partition(model: FEModel3D, unp_matrix: NDArray[float64] | lil_matrix, D1_indices: List[int], D2_indices: List[int]) -> Tuple[NDArray[float64], NDArray[float64]] | Tuple[NDArray[float64], NDArray[float64], NDArray[float64], NDArray[float64]]:
+def _partition(model: FEModel3D, unp_matrix: NDArray[float64] | lil_matrix, D1_indices: list[int], D2_indices: list[int]) -> tuple[NDArray[float64], NDArray[float64]] | tuple[NDArray[float64], NDArray[float64], NDArray[float64], NDArray[float64]]:
     """Partitions a matrix (or vector) into submatrices (or subvectors) based on degree of freedom boundary conditions.
 
     :param unp_matrix: The unpartitioned matrix (or vector) to be partitioned.
