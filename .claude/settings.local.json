@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(for s:*)",
+      "Bash(do echo:*)",
+      "Bash(SCENARIO=$s uv run python Testing/buckling_comparison.py)",
+      "Bash(done)",
+      "Bash(echo \"========== SCENARIO $s ==========\")"
+    ]
+  }
+}

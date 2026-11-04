@@ -1,5 +1,15 @@
 """
 Tests for modal analysis functionality in Pynite
+
+Note on units: `Material.rho` is a *weight* density in Pynite, not a mass density.
+`add_member_self_weight` builds the self-weight load as `rho*A` and reads it as a force per unit
+length, and the mass matrix then divides that by `gravity`. The mass per unit length is therefore
+`rho*A/g`, which is what `analytical_cantilever_frequency` below uses. The tests in this file are
+self-consistent on that basis, so the `rho` values here describe lighter materials than their
+magnitudes suggest.
+
+See `test_modal_verification.py` for the closed-form oracles, the convergence study behind the
+`elements_per_member` default, and the structural identities.
 """
 
 import pytest
@@ -45,7 +55,7 @@ def test_cantilever_frequency():
     # Add material and section
     E = 200e9  # Steel in Pa
     G = 80e9
-    rho = 7800  # kg/m³
+    rho = 7800  # N/m³ weight density, so the mass per unit volume is rho/g
     A = 0.01    # m²
     I = 8.33e-6 # m⁴
     J = 1.67e-6 # m⁴
@@ -171,7 +181,7 @@ def test_lumped_vs_consistent_mass():
 
     # Define material and section properties
     A = 0.1
-    rho = 7800  # Unit weight
+    rho = 7800  # Weight density, not mass density -- see the module docstring
     model.add_material('Steel', 200e9, 80e9, 0.3, rho)
     model.add_section('Beam', A, 8.33e-5, 8.33e-5, 1.67e-5)
 

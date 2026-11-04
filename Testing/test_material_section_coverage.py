@@ -88,7 +88,7 @@ class TestSection(unittest.TestCase):
 
     def test_section_creation(self):
         """Test basic section creation."""
-        section = Section(self.model, 'W8x31', 9.13, 37.1, 110, 0.536)
+        section = Section(self.model, 'W8x31', 9.13, 37.1, 110, 0.536, 0.0, 0.0)
         self.assertEqual(section.name, 'W8x31')
         self.assertEqual(section.A, 9.13)
         self.assertEqual(section.Iy, 37.1)
@@ -97,25 +97,25 @@ class TestSection(unittest.TestCase):
 
     def test_section_model_reference(self):
         """Test that section holds reference to model."""
-        section = Section(self.model, 'W8x31', 9.13, 37.1, 110, 0.536)
+        section = Section(self.model, 'W8x31', 9.13, 37.1, 110, 0.536, 0.0, 0.0)
         self.assertIs(section.model, self.model)
 
     def test_section_phi_not_implemented(self):
         """Test that base Section.Phi() raises NotImplementedError."""
-        section = Section(self.model, 'W8x31', 9.13, 37.1, 110, 0.536)
+        section = Section(self.model, 'W8x31', 9.13, 37.1, 110, 0.536, 0.0, 0.0)
         with self.assertRaises(NotImplementedError):
             section.Phi(100, 50, 50)
 
     def test_section_gradient_calculation(self):
         """Test gradient calculation for base Section class."""
-        section = Section(self.model, 'W8x31', 9.13, 37.1, 110, 0.536)
+        section = Section(self.model, 'W8x31', 9.13, 37.1, 110, 0.536, 0.0, 0.0)
         
         # Create a subclass that implements Phi for testing
         class TestSection(Section):
             def Phi(self, fx=0, my=0, mz=0):
                 return (fx**2 + my**2 + mz**2) / 1000
         
-        test_section = TestSection(self.model, 'Test', 9.13, 37.1, 110, 0.536)
+        test_section = TestSection(self.model, 'Test', 9.13, 37.1, 110, 0.536, 0.0, 0.0)
         gradient = test_section.G(100, 50, 25)
         
         # Gradient should be a 3x1 array
