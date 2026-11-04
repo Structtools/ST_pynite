@@ -110,6 +110,9 @@ class Member3D:
         # The 'Member3D' object will store results for one load combination at a time. To reduce repetative calculations the '_solved_combo' variable will be used to track whether the member needs to be resegmented before running calculations for any given load combination.
         self._solved_combo: LoadCombo | None = None  # The current solved load combination
 
+        # The transformation matrix depends only on the end node coordinates and the member rotation, so 'T' caches it here, keyed on those values.
+        self._T_cache: Tuple[Tuple[float, ...], NDArray[float64]] | None = None
+
         # Members need a link to the model they belong to
         self.model: FEModel3D = model
 
@@ -1409,6 +1412,21 @@ class Member3D:
     def T(self) -> NDArray[float64]:
         """
         Returns the transformation matrix for the member.
+
+        The matrix is built once and rebuilt only when an end node moves or the rotation changes.
+        It is read-only, because every caller shares the same array.
+        """
+
+        key = (self.i_node.X, self.i_node.Y, self.i_node.Z, self.j_node.X, self.j_node.Y, self.j_node.Z, self.rotation)
+        if self._T_cache is None or self._T_cache[0] != key:
+            transMatrix = self._build_T()
+            transMatrix.setflags(write=False)
+            self._T_cache = (key, transMatrix)
+        return self._T_cache[1]
+
+    def _build_T(self) -> NDArray[float64]:
+        """
+        Builds the transformation matrix from the end node coordinates and the member rotation.
         """
 
         # Get the global coordinates for the two ends
