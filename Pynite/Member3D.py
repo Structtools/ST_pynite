@@ -111,7 +111,7 @@ class Member3D:
         self._solved_combo: LoadCombo | None = None  # The current solved load combination
 
         # The transformation matrix depends only on the end node coordinates and the member rotation, so 'T' caches it here, keyed on those values.
-        self._T_cache: Tuple[Tuple[float, ...], NDArray[float64]] | None = None
+        self._T_cache: tuple[tuple[float, ...], NDArray[float64]] | None = None
 
         # Members need a link to the model they belong to
         self.model: FEModel3D = model
