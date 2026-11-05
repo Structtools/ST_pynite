@@ -1,23 +1,75 @@
 """
 Verification tests for linear buckling (stability) eigenvalue analysis.
 
-Tests
------
-1. Euler pinned-pinned column:
-   λ_cr = π²EI/(PL²)  →  must match within 1%
-2. Fixed-free cantilever column:
-   effective buckling length L_cr = 2L  →  must match within 2%
-3. Portal frame (fixed bases):
-   λ_cr > 1  (structure stable under applied loads)
+In-plane (flexural) buckling
+----------------------------
+1. Euler pinned-pinned column: λ_cr = π²EI/(PL²), within 1%.
+2. Fixed-free cantilever column: effective length L_cr = 2L, within 2%.
+3. Portal frame (fixed bases): λ_cr > 1 and the analysis runs.
+4. Portal frame with a rigid beam: column effective length factors K = 1.0 (fixed bases) and
+   K = 2.0 (pinned bases), within 1%.
+
+Out-of-plane buckling
+---------------------
+5. Column with unequal second moments of area: the 3D analysis finds the weak-axis Euler load,
+   labels the mode out-of-plane, and the in-plane / out-of-plane analyses each return their own
+   Euler load.
+5b. Buckling lengths: N_Ed is the largest compression along the member whatever its direction
+   (or the force at a given x), a member in tension gets inf, and asking a mode for the length
+   about an axis it does not bend the member about warns.
+6. Lateral-torsional buckling without warping, against the closed-form solutions of Timoshenko &
+   Gere, "Theory of Elastic Stability", Chapter 6 (all with Iw = 0):
+   - simply supported beam, uniform moment:      M_cr = (π/L)·sqrt(E·Iy·G·J)
+   - simply supported beam, central point load:  P_cr = 16.94·sqrt(E·Iy·G·J)/L²
+   - simply supported beam, uniform load:        q_cr = 28.3·sqrt(E·Iy·G·J)/L³
+   - cantilever, tip load:                        P_cr = 4.013·sqrt(E·Iy·G·J)/L²
+   - laterally and torsionally clamped ends, uniform moment: M_cr = (2π/L)·sqrt(E·Iy·G·J)
+7. Equivalent torsion constant approximation of warping: exact for the fork-supported beam in
+   uniform bending, M_cr = (π/L)·sqrt(E·Iy·(G·J + π²·E·Iw/L²)).
+7b. Load height: a transverse load applied at a distance z_g from the shear centre adds -|p|·z_g to
+   the twist stiffness. On a member too stiff to bend, the tip load of a cantilever twists it at
+   exactly P_cr = G·J/(L·z_g) and a uniform load at q_cr = (π/2)²·G·J/(L²·z_g); with bending, the
+   cantilever follows Timoshenko & Gere's first-order correction (1 - a·sqrt(EI/GJ)/L) for small
+   a, and the fork-supported beam with a central point load follows the EN 1993-1-1 Annex F
+   three-factor formula to within its own accuracy. A negative load factor reverses the effect of
+   the height, and a distributed load that changes sign matches the same load given in two pieces;
+   varying distributed loads are split correctly at interior nodes.
+8. Consistency: a beam whose second half is rotated 90° about its axis (with Iy and Iz swapped)
+   gives the same critical load as the unrotated beam. This exercises the My terms and the
+   local-to-global transformation of the moment terms.
+9. Planar frame: the 3D modes are the union of the in-plane and out-of-plane modes, and for an
+   unbraced IPE200 portal frame lateral-torsional buckling governs by a wide margin. The
+   axial-force-only matrix misses it. The same frame in XZ with Z up gives the same factors as
+   in XY with Y up.
+
+Units: the beam tests are non-dimensional (E = G = 1, L = 1). The frame tests use N and m.
 """
+
+import warnings
 
 import numpy as np
 import pytest
 from Pynite import FEModel3D
 
+# Closed-form lateral-torsional buckling coefficients for Iw = 0 (Timoshenko & Gere, Chapter 6)
+GAMMA_CENTRAL_POINT_LOAD = 16.94   # P_cr L² / sqrt(EI GJ), simply supported, load at the shear centre
+GAMMA_UNIFORM_LOAD = 28.3          # q_cr L³ / sqrt(EI GJ), simply supported, load at the shear centre
+GAMMA_CANTILEVER_TIP_LOAD = 4.013  # P_cr L² / sqrt(EI GJ), cantilever, load at the shear centre
+
+# IPE200 (SI units: N, m). Iy is the strong axis in Eurocode notation; members are rotated by 90°
+# in the frame models so that the strong axis bends in the XY plane.
+E_STEEL = 210e9
+G_STEEL = 80.77e9
+IPE200 = dict(A=28.48e-4, Iy=1943e-8, Iz=142e-8, J=7.0e-8, Iw=12990e-12)
+
+# Fork support DOFs for a beam along X: lateral displacement and twist restrained, bending
+# rotations free. The i-end also carries the axial restraint.
+FORK_I = (True, True, True, True, False, False)
+FORK_J = (False, True, True, True, False, False)
+
 
 # ---------------------------------------------------------------------------
-# Helper: build a vertical column model (along global Y)
+# Helpers
 # ---------------------------------------------------------------------------
 def _build_column(n_elem, E, G, nu, A, Iy, Iz, J, L, support_base, support_top,
                   load_direction='FY', P=-1.0):
@@ -46,6 +98,56 @@ def _build_column(n_elem, E, G, nu, A, Iy, Iz, J, L, support_base, support_top,
 
     # Compressive load at top node
     model.add_node_load(f'N{n_elem+1}', load_direction, P)
+
+    return model
+
+
+def _beam(L=1.0, Iy=1.0, Iz=10.0, J=1.0, Iw=None, A=1e3):
+    """A single-member beam along X with E = G = 1, lateral (weak) axis Iy and strong axis Iz."""
+    model = FEModel3D()
+    model.add_material('Mat', 1.0, 1.0, 0.0, 0.0)
+    model.add_section('Sec', A, Iy, Iz, J, Iw=Iw)
+    model.add_node('N0', 0.0, 0.0, 0.0)
+    model.add_node('N1', L, 0.0, 0.0)
+    model.add_member('Beam', 'N0', 'N1', 'Mat', 'Sec')
+    return model
+
+
+def _uniform_moment_beam(support_i=FORK_I, support_j=FORK_J, **kwargs):
+    """A beam under equal and opposite end moments of 1 about Z (uniform in-plane moment)."""
+    model = _beam(**kwargs)
+    model.def_support('N0', *support_i)
+    model.def_support('N1', *support_j)
+    model.add_node_load('N0', 'MZ', 1.0)
+    model.add_node_load('N1', 'MZ', -1.0)
+    return model
+
+
+def _portal_frame(brace_eaves=False, w=-10e3, z_g=0.0):
+    """A 5 m x 3 m IPE200 portal frame in the XY plane with fixed bases, strong axis in-plane."""
+    model = FEModel3D()
+    model.add_material('Steel', E_STEEL, G_STEEL, 0.3, 0.0)
+    model.add_section('IPE200', **IPE200)
+
+    model.add_node('A', 0.0, 0.0, 0.0)
+    model.add_node('B', 0.0, 3.0, 0.0)
+    model.add_node('C', 5.0, 3.0, 0.0)
+    model.add_node('D', 5.0, 0.0, 0.0)
+
+    # Rotating the members by 90° puts the Eurocode strong axis (Iy) in the plane of the frame
+    model.add_member('Col1', 'A', 'B', 'Steel', 'IPE200', rotation=90)
+    model.add_member('Beam', 'B', 'C', 'Steel', 'IPE200', rotation=90)
+    model.add_member('Col2', 'D', 'C', 'Steel', 'IPE200', rotation=90)
+
+    model.def_support('A', True, True, True, True, True, True)
+    model.def_support('D', True, True, True, True, True, True)
+
+    if brace_eaves:
+        # Lateral and torsional restraint at the eaves
+        model.def_support('B', False, False, True, True, False, False)
+        model.def_support('C', False, False, True, True, False, False)
+
+    model.add_member_dist_load('Beam', 'FY', w, w, load_height=z_g)
 
     return model
 
@@ -144,7 +246,11 @@ def test_cantilever_effective_length():
 
     # Check effective buckling length L_cr = π·sqrt(EI / N_cr)
     # With N_cr = λ · |P| = λ · 1 and EI = 1: L_cr = π/sqrt(λ) = 2L for λ = π²/4
-    L_cr_computed = results.effective_length('Column', mode=0, plane='y')
+    # Iy = Iz, so the first two modes are the same Euler load about either axis, in no particular
+    # order, and the mode asked about may bend the column about z rather than y (with a warning)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        L_cr_computed = results.effective_length('Column', mode=0, plane='y')
     L_cr_expected = 2.0 * L   # = 2.0
 
     rel_error_Lcr = abs(L_cr_computed - L_cr_expected) / L_cr_expected
@@ -228,14 +334,821 @@ def test_portal_frame_buckling():
 
 
 # ---------------------------------------------------------------------------
+# Test 4: In-plane sway buckling of a portal frame with a rigid beam
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('fixed_base, K', [(True, 1.0), (False, 2.0)])
+def test_rigid_beam_portal_effective_length_factor(fixed_base, K):
+    """
+    A sway portal frame whose beam is rigid compared to its columns has the textbook column
+    effective length factors K = 1.0 (fixed bases) and K = 2.0 (pinned bases).
+
+    Checks the critical load factor and the derived buckling length, within 1%.
+    """
+    E, I, h = 1.0, 1.0, 1.0
+
+    model = FEModel3D()
+    model.add_material('Mat', E, E/2.6, 0.3, 0.0)
+    model.add_section('Col', 1e3, I, I, 2*I)
+    model.add_section('Rigid', 1e3, 1e5*I, 1e5*I, 2e5*I)
+
+    model.add_node('A', 0.0, 0.0, 0.0)
+    model.add_node('B', 0.0, h, 0.0)
+    model.add_node('C', 2.0, h, 0.0)
+    model.add_node('D', 2.0, 0.0, 0.0)
+
+    model.add_member('Col1', 'A', 'B', 'Mat', 'Col')
+    model.add_member('Beam', 'B', 'C', 'Mat', 'Rigid')
+    model.add_member('Col2', 'D', 'C', 'Mat', 'Col')
+
+    model.def_support('A', True, True, True, True, True, fixed_base)
+    model.def_support('D', True, True, True, True, True, fixed_base)
+
+    model.add_node_load('B', 'FY', -1.0)
+    model.add_node_load('C', 'FY', -1.0)
+
+    results = model.analyze_buckling(num_modes=2, plane='XY')
+
+    N_cr = np.pi**2*E*I/(K*h)**2
+    assert results.load_multipliers[0] == pytest.approx(N_cr, rel=0.01)
+
+    # In-plane bending of a vertical member is about its local z-axis
+    assert results.effective_length('Col1', mode=0, plane='z') == pytest.approx(K*h, rel=0.01)
+
+    # The first-order member forces of the analysed combination are available on the model
+    assert abs(model.members['Col1'].axial(0.0, 'Combo 1')) == pytest.approx(1.0, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Test 5: Weak-axis (out-of-plane) flexural buckling of a column
+# ---------------------------------------------------------------------------
+def test_weak_axis_column_buckles_out_of_plane():
+    """
+    A pin-ended column in the XY plane with Iy = 1 (bending out of plane, in Z) and Iz = 4
+    (bending in plane). The 3D analysis must find the weak-axis Euler load π² first and label it
+    out-of-plane; the in-plane analysis must find 4π² and the out-of-plane analysis π².
+
+    A = 1000 and J = Ip keep the torsional eigenvalue G·J·A/(P·Ip) = 1000 far above the flexural ones.
+    """
+    # Pinned about both axes at both ends, twist (RY for a column along Y) restrained
+    support_base = (True, True, True, False, True, False)
+    support_top = (True, False, True, False, True, False)
+
+    model = _build_column(1, E=1.0, G=1.0, nu=0.0, A=1e3, Iy=1.0, Iz=4.0, J=5.0, L=1.0,
+                          support_base=support_base, support_top=support_top, P=-1.0)
+
+    results_3d = model.analyze_buckling(num_modes=2)
+    assert results_3d.load_multipliers[0] == pytest.approx(np.pi**2, rel=0.005)
+    assert results_3d.classify_modes('XY')[0] == 'out-of-plane'
+    assert results_3d.out_of_plane_share('XY')[0] == pytest.approx(1.0, abs=1e-9)
+
+    results_in = model.analyze_buckling(num_modes=1, plane='XY')
+    assert results_in.load_multipliers[0] == pytest.approx(4*np.pi**2, rel=0.005)
+    assert results_in.classify_modes()[0] == 'in-plane'
+
+    results_out = model.analyze_buckling(num_modes=1, plane='XY', out_of_plane=True)
+    assert results_out.load_multipliers[0] == pytest.approx(np.pi**2, rel=0.005)
+    assert results_out.classify_modes()[0] == 'out-of-plane'
+    assert results_out.effective_length('Column', mode=0, plane='y') == pytest.approx(1.0, rel=0.005)
+
+
+# ---------------------------------------------------------------------------
+# Test 5b: Buckling lengths
+# ---------------------------------------------------------------------------
+def _column_with_axial_member_load(base_to_top):
+    """A pin-ended column along Y (E = I = L = 1) with 1 at the top and 2 spread along it, so N = 1 to 3."""
+    model = FEModel3D()
+    model.add_material('Mat', 1.0, 1.0, 0.0, 0.0)
+    model.add_section('Sec', 1e3, 1.0, 1.0, 2.0)
+    model.add_node('Base', 0.0, 0.0, 0.0)
+    model.add_node('Top', 0.0, 1.0, 0.0)
+    if base_to_top:
+        model.add_member('Column', 'Base', 'Top', 'Mat', 'Sec')
+    else:
+        model.add_member('Column', 'Top', 'Base', 'Mat', 'Sec')
+    model.def_support('Base', True, True, True, False, True, False)
+    model.def_support('Top', True, False, True, False, True, False)
+    model.add_node_load('Top', 'FY', -1.0)
+    model.add_member_dist_load('Column', 'FY', -2.0, -2.0)
+    return model
+
+
+def test_effective_length_uses_largest_compression_whatever_the_member_direction():
+    """
+    N_Ed is the largest compression along the member, so the buckling length does not depend on
+    which end is the i-node. With `x` the axial force at that location is used instead.
+    """
+    for base_to_top in (True, False):
+        results = _column_with_axial_member_load(base_to_top).analyze_buckling(num_modes=1, plane='XY')
+        lam = results.load_multipliers[0]
+
+        # In-plane bending of a vertical member is about its local z-axis
+        assert results.effective_length('Column', plane='z') == pytest.approx(np.pi/np.sqrt(3*lam), rel=1e-6)
+
+        x_top = 1.0 if base_to_top else 0.0
+        assert results.effective_length('Column', plane='z', x=x_top) == pytest.approx(np.pi/np.sqrt(lam), rel=1e-6)
+
+
+def test_effective_length_of_member_in_tension_is_infinite():
+    """A member in tension has no flexural buckling length."""
+    model = FEModel3D()
+    model.add_material('Mat', 1.0, 1.0, 0.0, 0.0)
+    model.add_section('Sec', 1e3, 1.0, 1.0, 2.0)
+    for name, X, Y in (('A', 0.0, 0.0), ('B', 0.0, 1.0), ('C', 2.0, 1.0), ('D', 2.0, 0.0)):
+        model.add_node(name, X, Y, 0.0)
+    model.add_member('Col1', 'A', 'B', 'Mat', 'Sec')
+    model.add_member('Beam', 'B', 'C', 'Mat', 'Sec')
+    model.add_member('Col2', 'D', 'C', 'Mat', 'Sec')
+    model.def_support('A', True, True, True, True, True, True)
+    model.def_support('D', True, True, True, True, True, True)
+    model.add_node_load('B', 'FY', -1.0)
+    model.add_node_load('C', 'FY', 0.2)   # lifts Col2 into tension
+
+    results = model.analyze_buckling(num_modes=1, plane='XY')
+
+    assert model.members['Col2'].axial(0.0, 'Combo 1') < 0.0
+    assert results.effective_length('Col2', plane='z') == float('inf')
+    assert np.isfinite(results.effective_length('Col1', plane='z'))
+
+
+def test_effective_length_warns_when_the_mode_does_not_bend_the_member_about_the_axis():
+    """
+    The weak-axis mode of the column of Test 5 bends it about its local y-axis only. Asking that
+    mode for the length about the local z-axis (in-plane) gives no buckling length about it and
+    warns; the in-plane analysis gives the in-plane length without a warning. A member of the
+    caller's model may be passed instead of its name.
+    """
+    support_base = (True, True, True, False, True, False)
+    support_top = (True, False, True, False, True, False)
+    model = _build_column(1, E=1.0, G=1.0, nu=0.0, A=1e3, Iy=1.0, Iz=4.0, J=5.0, L=1.0,
+                          support_base=support_base, support_top=support_top, P=-1.0)
+
+    results_3d = model.analyze_buckling(num_modes=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        assert results_3d.effective_length('Column', mode=0, plane='y') == pytest.approx(1.0, rel=0.005)
+        assert results_3d.effective_length(model.members['Column'], plane='y') == \
+            results_3d.effective_length('Column', plane='y')
+
+    with pytest.warns(UserWarning, match="hardly bends member 'Column' about its local z-axis"):
+        results_3d.effective_length('Column', mode=0, plane='z')
+
+    results_in = model.analyze_buckling(num_modes=1, plane='XY')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        assert results_in.effective_length('Column', mode=0, plane='z') == pytest.approx(1.0, rel=0.005)
+
+    with pytest.raises(ValueError):
+        results_in.effective_length('Column', plane='x')
+
+
+# ---------------------------------------------------------------------------
+# Test 6: Lateral-torsional buckling against closed-form solutions (Iw = 0)
+# ---------------------------------------------------------------------------
+def test_ltb_simply_supported_uniform_moment():
+    """Fork-supported beam under uniform moment: M_cr = (π/L)·sqrt(E·Iy·G·J) = π."""
+    model = _uniform_moment_beam()
+
+    results = model.analyze_buckling(num_modes=1, elements_per_member=8)
+
+    assert results.load_multipliers[0] == pytest.approx(np.pi, rel=0.01)
+
+    # The buckled shape is lateral displacement and twist only
+    assert results.classify_modes('XY') == ['out-of-plane']
+
+
+def test_ltb_simply_supported_central_point_load():
+    """Fork-supported beam with a central point load at the shear centre: P_cr·L²/sqrt(EI·GJ) = 16.94."""
+    model = _beam()
+    model.def_support('N0', *FORK_I)
+    model.def_support('N1', *FORK_J)
+    model.add_member_pt_load('Beam', 'FY', -1.0, 0.5)
+
+    results = model.analyze_buckling(num_modes=1, elements_per_member=16)
+
+    assert results.load_multipliers[0] == pytest.approx(GAMMA_CENTRAL_POINT_LOAD, rel=0.005)
+
+
+def test_ltb_simply_supported_uniform_load():
+    """Fork-supported beam with a uniform load at the shear centre: q_cr·L³/sqrt(EI·GJ) = 28.3."""
+    model = _beam()
+    model.def_support('N0', *FORK_I)
+    model.def_support('N1', *FORK_J)
+    model.add_member_dist_load('Beam', 'FY', -1.0, -1.0)
+
+    results = model.analyze_buckling(num_modes=1, elements_per_member=16)
+
+    assert results.load_multipliers[0] == pytest.approx(GAMMA_UNIFORM_LOAD, rel=0.01)
+
+
+def test_ltb_cantilever_tip_load():
+    """Cantilever with a tip load at the shear centre: P_cr·L²/sqrt(EI·GJ) = 4.013."""
+    model = _beam()
+    model.def_support('N0', True, True, True, True, True, True)
+    model.add_node_load('N1', 'FY', -1.0)
+
+    results = model.analyze_buckling(num_modes=1, elements_per_member=16)
+
+    assert results.load_multipliers[0] == pytest.approx(GAMMA_CANTILEVER_TIP_LOAD, rel=0.005)
+
+
+def test_ltb_clamped_ends_uniform_moment():
+    """
+    Beam with lateral rotation and twist restrained at both ends (in-plane rotation free) under
+    uniform moment. With Iw = 0 the lateral buckling length is L/2: M_cr = (2π/L)·sqrt(E·Iy·G·J).
+    """
+    model = _uniform_moment_beam(support_i=(True, True, True, True, True, False),
+                                 support_j=(False, True, True, True, True, False))
+
+    results = model.analyze_buckling(num_modes=1, elements_per_member=16)
+
+    assert results.load_multipliers[0] == pytest.approx(2*np.pi, rel=0.01)
+
+
+def test_axial_only_geometric_stiffness_misses_lateral_torsional_buckling():
+    """
+    Without the moment terms the cantilever carries no axial force, so the geometric stiffness
+    matrix is empty and no buckling mode exists. This is the failure mode the moment terms fix.
+    """
+    model = _beam()
+    model.def_support('N0', True, True, True, True, True, True)
+    model.add_node_load('N1', 'FY', -1.0)
+
+    with pytest.raises(ValueError, match='geometric stiffness matrix is zero'):
+        model.analyze_buckling(num_modes=1, include_moments=False)
+
+
+# ---------------------------------------------------------------------------
+# Test 7: Equivalent torsion constant approximation of warping
+# ---------------------------------------------------------------------------
+def test_ltb_equivalent_torsion_constant_matches_closed_form_with_warping():
+    """
+    For a fork-supported beam in uniform bending the equivalent torsion constant
+    J_eff = J + π²·E·Iw/(G·L²) reproduces the closed-form critical moment with warping exactly:
+    M_cr = (π/L)·sqrt(E·Iy·(G·J + π²·E·Iw/L²)).
+    """
+    Iw = 0.5
+    model = _uniform_moment_beam(Iw=Iw)
+
+    results = model.analyze_buckling(num_modes=1, elements_per_member=16,
+                                     warping='equivalent_torsion')
+
+    M_cr = np.pi*np.sqrt(1.0*(1.0 + np.pi**2*Iw))
+    assert results.load_multipliers[0] == pytest.approx(M_cr, rel=0.005)
+    assert results.warping == 'equivalent_torsion'
+
+    # The user's model is untouched by the override
+    assert all(member._J_eff is None for member in model.members.values())
+
+
+def test_equivalent_torsion_requires_warping_constant():
+    """The warping approximation needs Iw on every section."""
+    model = _uniform_moment_beam()
+
+    with pytest.raises(ValueError, match='Iw'):
+        model.analyze_buckling(warping='equivalent_torsion')
+
+
+def test_fork_supported_beam_does_not_warn_about_warping_length():
+    """Twist held at both ends: the member length is the warping length, no warning."""
+    model = _uniform_moment_beam(Iw=0.5)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        model.analyze_buckling(num_modes=1, warping='equivalent_torsion')
+
+
+def _twist_free_top_column(Iw=1.0):
+    """
+    A column along Y whose twist is held at the base only. Both ends are held laterally, so
+    the weak-axis Euler load (π²·E·I/L² = 98.7) is far above the torsional buckling load, and the
+    first mode is torsional. Nondimensional: E = G = 1, L = 1, A = 1, Iy = Iz = 10, J = 1.
+    """
+    model = FEModel3D()
+    model.add_material('Mat', 1.0, 1.0, 0.0, 0.0)
+    model.add_section('Sec', 1.0, 10.0, 10.0, 1.0, Iw=Iw)
+    model.add_node('N0', 0.0, 0.0, 0.0)
+    model.add_node('N1', 0.0, 1.0, 0.0)
+    model.add_member('Column', 'N0', 'N1', 'Mat', 'Sec')
+    # Base: translations and the twist (RY) held, bending rotations free.
+    model.def_support('N0', True, True, True, False, True, False)
+    # Top: held laterally, free axially, free to rotate and to twist.
+    model.def_support('N1', True, False, True, False, False, False)
+    model.add_node_load('N1', 'FY', -1.0)
+    return model
+
+
+def test_torsional_buckling_with_twist_free_end_needs_warping_length_2L():
+    """
+    Torsional buckling of a column whose twist is held at one end only (Timoshenko & Gere):
+    N_cr,T = (G·J + π²·E·Iw/L_T²)·A/I_p with L_T = 2·L. With the warping length set to 2·L the
+    equivalent torsion constant reproduces it; left at the member length it overstates the
+    warping stiffness and gives a critical load 3.1 times too high, and the analysis warns.
+    """
+    Ip = 10.0 + 10.0
+    N_cr_T = (1.0 + np.pi**2*1.0/(2.0)**2)/Ip
+    N_wrong = (1.0 + np.pi**2*1.0/(1.0)**2)/Ip
+
+    # The default (member length) is unconservative here and must say so
+    model = _twist_free_top_column()
+    with pytest.warns(UserWarning, match='warping length'):
+        results = model.analyze_buckling(num_modes=1, elements_per_member=8,
+                                         warping='equivalent_torsion')
+    assert results.load_multipliers[0] == pytest.approx(N_wrong, rel=0.01)
+    assert results.load_multipliers[0] > 3.0*N_cr_T
+
+    # With the twist-restraint spacing declared, the closed form is reproduced and nothing warns
+    model = _twist_free_top_column()
+    model.def_warping_length('Column', 2.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        results = model.analyze_buckling(num_modes=1, elements_per_member=8,
+                                         warping='equivalent_torsion')
+    assert results.load_multipliers[0] == pytest.approx(N_cr_T, rel=0.01)
+
+    # Twist held at neither end: no warping stiffness is counted
+    model = _twist_free_top_column()
+    model.def_support('N0', True, True, True, False, False, False)
+    model.def_support('N1', True, False, True, False, False, False)
+    # ... which is a twist mechanism, so hold the twist at an interior node instead
+    model.add_node('Nm', 0.0, 0.5, 0.0)
+    model.def_support('Nm', False, False, False, False, True, False)
+    model.def_warping_length('Column', float('inf'))
+    results = model.analyze_buckling(num_modes=1, elements_per_member=8,
+                                     warping='equivalent_torsion')
+    assert results.load_multipliers[0] == pytest.approx(1.0/Ip, rel=0.01)
+
+
+def test_def_warping_length_validates_its_arguments():
+    model = _twist_free_top_column()
+    with pytest.raises(NameError):
+        model.def_warping_length('NoSuchMember', 2.0)
+    with pytest.raises(ValueError):
+        model.def_warping_length('Column', 0.0)
+    with pytest.raises(ValueError):
+        model.def_warping_length('Column', -1.0)
+    with pytest.raises(ValueError):
+        model.def_warping_length('Column', float('nan'))
+    model.def_warping_length('Column', float('inf'))
+    assert model.members['Column'].warping_length == float('inf')
+
+
+# ---------------------------------------------------------------------------
+# Test 7b: Load height
+# ---------------------------------------------------------------------------
+def _stiff_cantilever(rotation=0.0):
+    """A cantilever far too stiff in bending to buckle laterally, so that only twist is left."""
+    model = FEModel3D()
+    model.add_material('Mat', 1.0, 1.0, 0.0, 0.0)
+    model.add_section('Sec', 1e3, 1e6, 1e6, 1.0)
+    model.add_node('N0', 0.0, 0.0, 0.0)
+    model.add_node('N1', 1.0, 0.0, 0.0)
+    model.add_member('Beam', 'N0', 'N1', 'Mat', 'Sec', rotation=rotation)
+    model.def_support('N0', True, True, True, True, True, True)
+    return model
+
+
+@pytest.mark.parametrize('rotation, direction', [(0.0, 'FY'), (90.0, 'FY'), (0.0, 'Fy'), (0.0, 'FZ')])
+def test_load_height_point_load_twists_stiff_cantilever(rotation, direction):
+    """
+    A tip load P at height z_g above the shear centre of a torsionally soft but flexurally rigid
+    cantilever has the potential -½·P·z_g·φ² against the strain energy ½·(GJ/L)·φ², so the
+    cantilever twists over at exactly P_cr = G·J/(L·z_g). The twist is linear, so the finite
+    element answer is exact whatever the subdivision. The sign convention of the load height is
+    tied to the load's line of action, so the result must not depend on the member rotation or
+    on whether the load is given in local or global coordinates.
+    """
+    model = _stiff_cantilever(rotation)
+    model.add_member_pt_load('Beam', direction, -1.0, 1.0, load_height=0.25)
+
+    results = model.analyze_buckling(num_modes=1, elements_per_member=8)
+
+    assert results.load_multipliers[0] == pytest.approx(1.0/(1.0*0.25), rel=1e-5)
+
+
+def test_load_height_point_load_along_member_and_stabilising_sign():
+    """A load at mid-length twists only the first half: P_cr = G·J/(x·z_g). A negative load height stabilises."""
+    model = _stiff_cantilever()
+    model.add_member_pt_load('Beam', 'FY', -1.0, 0.5, load_height=0.25)
+    results = model.analyze_buckling(num_modes=1, elements_per_member=8)
+    assert results.load_multipliers[0] == pytest.approx(1.0/(0.5*0.25), rel=1e-5)
+
+    # A load hanging below the shear centre (acting away from it) cannot twist the member over;
+    # the only mode left is the lateral-torsional one of the very stiff section, far higher up
+    model = _stiff_cantilever()
+    model.add_member_pt_load('Beam', 'FY', -1.0, 1.0, load_height=-0.25)
+    results = model.analyze_buckling(num_modes=1, elements_per_member=8)
+    assert results.load_multipliers[0] > 100.0
+
+
+def test_load_height_distributed_load_twists_stiff_cantilever():
+    """
+    A uniform load q at height z_g on the flexurally rigid cantilever: G·J·φ'' + q·z_g·φ = 0 with
+    φ(0) = 0 and φ'(L) = 0 gives q_cr = (π/2)²·G·J/(L²·z_g). Linear twist elements converge from
+    above; 16 elements are within 0.1 %.
+    """
+    model = _stiff_cantilever()
+    model.add_member_dist_load('Beam', 'FY', -1.0, -1.0, load_height=0.25)
+
+    results = model.analyze_buckling(num_modes=1, elements_per_member=16)
+
+    assert results.load_multipliers[0] == pytest.approx((np.pi/2)**2/0.25, rel=0.002)
+
+
+def test_load_height_partial_distributed_load_with_load_factor():
+    """
+    A uniform load over the middle half of the flexurally rigid cantilever, factored by 2 in the
+    load combination, against a fine one-dimensional finite difference solution of
+    G·J·φ'' + 2·q·z_g·φ = 0 on the loaded part.
+    """
+    model = _stiff_cantilever()
+    model.add_member_dist_load('Beam', 'FY', -1.0, -1.0, x1=0.25, x2=0.75, case='D', load_height=0.25)
+    model.add_load_combo('C', {'D': 2.0})
+
+    results = model.analyze_buckling(combo_name='C', num_modes=1, elements_per_member=16)
+
+    # Reference: 2000 linear twist elements
+    n = 2000
+    h = 1.0/n
+    K = np.zeros((n + 1, n + 1))
+    Kg = np.zeros((n + 1, n + 1))
+    for e in range(n):
+        K[e:e + 2, e:e + 2] += np.array([[1, -1], [-1, 1]])/h
+        if 0.25 <= (e + 0.5)*h <= 0.75:
+            Kg[e:e + 2, e:e + 2] += -2.0*0.25*h*np.array([[2, 1], [1, 2]])/6
+    mu = np.linalg.eigvals(np.linalg.solve(K[1:, 1:], -Kg[1:, 1:])).real
+    reference = 1.0/mu[mu > 0].max()
+
+    assert results.load_multipliers[0] == pytest.approx(reference, rel=0.005)
+
+
+def test_load_height_cantilever_matches_timoshenko_gere_first_order_correction():
+    """
+    Timoshenko & Gere (eq. 6-30): a tip load applied at height a above the centroid of a
+    cantilever changes the critical load by the factor (1 - a·sqrt(EI/GJ)/L), to first order in
+    a. With EI = GJ = L = 1 and a = ±0.02 the finite element ratio must match to within the
+    second-order terms.
+    """
+    def critical_load(a):
+        model = _beam()
+        model.def_support('N0', True, True, True, True, True, True)
+        model.add_member_pt_load('Beam', 'FY', -1.0, 1.0, load_height=a)
+        return model.analyze_buckling(num_modes=1, elements_per_member=16).load_multipliers[0]
+
+    reference = critical_load(0.0)
+    assert critical_load(0.02)/reference == pytest.approx(0.98, rel=0.003)
+    assert critical_load(-0.02)/reference == pytest.approx(1.02, rel=0.003)
+
+
+@pytest.mark.parametrize('z_g', [0.1, -0.1])
+def test_load_height_matches_annex_f_three_factor_formula(z_g):
+    """
+    Fork-supported beam with a central point load at the top (z_g > 0) or bottom (z_g < 0)
+    flange, against the EN 1993-1-1 Annex F / NCCI SN003 three-factor formula with C1 = 1.365
+    and C2 = 0.553 and Iw = 0. The formula is itself a fit, about 1 % off the exact solution at
+    z_g = 0, so agreement to 5 % is what can be asked.
+    """
+    model = _beam()
+    model.def_support('N0', *FORK_I)
+    model.def_support('N1', *FORK_J)
+    model.add_member_pt_load('Beam', 'FY', -1.0, 0.5, load_height=z_g)
+
+    results = model.analyze_buckling(num_modes=1, elements_per_member=16)
+
+    C1, C2 = 1.365, 0.553
+    M_cr = C1*np.pi**2*(np.sqrt(1.0/np.pi**2 + (C2*z_g)**2) - C2*z_g)   # E·Iy = G·J = L = 1
+    assert results.load_multipliers[0] == pytest.approx(4*M_cr, rel=0.05)
+
+
+def test_load_height_reduces_portal_frame_out_of_plane_factor():
+    """Top flange loading of the portal frame's beam lowers α_cr,op; bottom flange loading raises it."""
+    lam = {z_g: _portal_frame(z_g=z_g).analyze_buckling(num_modes=1, plane='XY', out_of_plane=True)
+           .load_multipliers[0] for z_g in (0.1, 0.0, -0.1)}
+
+    assert lam[0.1] < 0.85*lam[0.0] < lam[0.0] < lam[-0.1]
+
+    # The static analysis does not see the load height
+    with_height = _portal_frame(z_g=0.1)
+    without = _portal_frame()
+    with_height.analyze()
+    without.analyze()
+    assert with_height.members['Beam'].max_moment('My') == pytest.approx(without.members['Beam'].max_moment('My'))
+
+
+def test_load_height_is_rejected_for_moments():
+    """A moment has no point of application to displace, so a load height is an error."""
+    model = _beam()
+    with pytest.raises(ValueError, match='load height'):
+        model.add_member_pt_load('Beam', 'Mz', 1.0, 0.5, load_height=0.1)
+
+
+def test_load_height_negative_load_factor_reverses_its_effect():
+    """
+    The load height describes the load as defined in its load case. A factor of -1 reverses the
+    load: a downward load on the top flange then acts upward, away from the shear centre, and
+    stabilises, while a downward load hanging from the bottom flange then acts towards the shear
+    centre and twists the stiff cantilever over at P_cr = G·J/(L·z_g).
+    """
+    def critical_load(z_g, factor):
+        model = _stiff_cantilever()
+        model.add_member_pt_load('Beam', 'FY', -1.0, 1.0, case='D', load_height=z_g)
+        model.add_load_combo('C', {'D': factor})
+        return model.analyze_buckling(combo_name='C', num_modes=1).load_multipliers[0]
+
+    assert critical_load(0.25, 1.0) == pytest.approx(1.0/(1.0*0.25), rel=1e-5)
+    assert critical_load(0.25, -1.0) > 100.0
+    assert critical_load(-0.25, 1.0) > 100.0
+    assert critical_load(-0.25, -1.0) == pytest.approx(1.0/(1.0*0.25), rel=1e-5)
+
+
+def test_load_height_distributed_load_changing_sign_matches_split_load():
+    """
+    For a distributed load that changes sign, the load height refers to the direction of its
+    resultant and the part acting the other way has the opposite effect. The load w(x) = 1 - 4x on
+    the top flange (resultant downward) must give the critical load of the same load given as two
+    pieces, the upward piece 0 <= x <= 0.25 with the opposite load height. Both integrals are exact.
+    The upward piece falls on whole sub-members of the subdivision, which must still see the
+    direction of the whole load.
+    """
+    z_g = 0.25
+
+    whole = _stiff_cantilever()
+    whole.add_member_dist_load('Beam', 'FY', 1.0, -3.0, load_height=z_g)
+
+    split = _stiff_cantilever()
+    split.add_member_dist_load('Beam', 'FY', 1.0, 0.0, x1=0.0, x2=0.25, load_height=-z_g)
+    split.add_member_dist_load('Beam', 'FY', 0.0, -3.0, x1=0.25, x2=1.0, load_height=z_g)
+
+    lam_whole = whole.analyze_buckling(num_modes=1).load_multipliers[0]
+    lam_split = split.analyze_buckling(num_modes=1).load_multipliers[0]
+
+    assert lam_whole == pytest.approx(lam_split, rel=1e-6)
+
+
+def test_varying_distributed_load_is_split_correctly_at_interior_nodes():
+    """
+    A physical member running through interior nodes carries a varying distributed load in
+    pieces, one per sub-member. The pieces must follow the original load, so a triangular load on
+    a simply supported beam with interior nodes gives the textbook reactions. The buckling
+    analysis subdivides every member, so its pre-solve depends on this too.
+    """
+    model = FEModel3D()
+    model.add_material('Mat', 1.0, 1.0, 0.0, 0.0)
+    model.add_section('Sec', 1.0, 1.0, 1.0, 1.0)
+    model.add_node('A', 0.0, 0.0, 0.0)
+    for i in (1, 2, 3):
+        model.add_node(f'I{i}', float(i), 0.0, 0.0)
+    model.add_node('B', 4.0, 0.0, 0.0)
+    model.add_member('Beam', 'A', 'B', 'Mat', 'Sec')
+    model.def_support('A', True, True, True, True, False, False)
+    model.def_support('B', False, True, True, False, False, False)
+    model.add_member_dist_load('Beam', 'Fy', 0.0, -12.0)   # total 24, resultant at 2/3 of the span
+
+    model.analyze_linear()
+
+    assert model.nodes['A'].RxnFY['Combo 1'] == pytest.approx(8.0, rel=1e-9)
+    assert model.nodes['B'].RxnFY['Combo 1'] == pytest.approx(16.0, rel=1e-9)
+    pieces = [(load[1], load[2]) for sub in model.members['Beam'].sub_members.values() for load in sub.DistLoads]
+    assert pieces == pytest.approx([(0.0, -3.0), (-3.0, -6.0), (-6.0, -9.0), (-9.0, -12.0)])
+
+
+# ---------------------------------------------------------------------------
+# Test 8: Rotated member consistency
+# ---------------------------------------------------------------------------
+def test_rotated_member_gives_same_critical_load():
+    """
+    The second half of a fork-supported beam with a central point load is rotated 90° about its
+    axis, with Iy and Iz swapped so that the physical beam is unchanged. The in-plane moment is
+    then My in the rotated half and Mz in the other, and the critical load must not change.
+    """
+    rotated = FEModel3D()
+    rotated.add_material('Mat', 1.0, 1.0, 0.0, 0.0)
+    rotated.add_section('Sec', 1e3, 1.0, 10.0, 1.0)
+    rotated.add_section('SecRot', 1e3, 10.0, 1.0, 1.0)
+    rotated.add_node('N0', 0.0, 0.0, 0.0)
+    rotated.add_node('N1', 0.5, 0.0, 0.0)
+    rotated.add_node('N2', 1.0, 0.0, 0.0)
+    rotated.add_member('B1', 'N0', 'N1', 'Mat', 'Sec')
+    rotated.add_member('B2', 'N1', 'N2', 'Mat', 'SecRot', rotation=90)
+    rotated.def_support('N0', *FORK_I)
+    rotated.def_support('N2', *FORK_J)
+    rotated.add_node_load('N1', 'FY', -1.0)
+
+    straight = _beam()
+    straight.def_support('N0', *FORK_I)
+    straight.def_support('N1', *FORK_J)
+    straight.add_member_pt_load('Beam', 'FY', -1.0, 0.5)
+
+    lam_rotated = rotated.analyze_buckling(num_modes=1, elements_per_member=8).load_multipliers[0]
+    lam_straight = straight.analyze_buckling(num_modes=1, elements_per_member=16).load_multipliers[0]
+
+    assert lam_rotated == pytest.approx(lam_straight, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Test 9: Planar frame — in-plane, out-of-plane and 3D analyses
+# ---------------------------------------------------------------------------
+def test_portal_frame_modes_are_union_of_in_plane_and_out_of_plane_modes():
+    """
+    For a planar frame loaded in its plane the in-plane and out-of-plane DOFs are uncoupled, so
+    the modes of the 3D analysis are the union of the modes of the two restricted analyses.
+    """
+    model = _portal_frame()
+
+    # The unbraced frame's first several modes are all out-of-plane, so the restricted analyses
+    # together have to supply at least as many modes as the 3D analysis is asked for
+    results_3d = model.analyze_buckling(num_modes=6)
+    results_in = model.analyze_buckling(num_modes=3, plane='XY')
+    results_out = model.analyze_buckling(num_modes=6, plane='XY', out_of_plane=True)
+
+    union = np.sort(np.concatenate([results_in.load_multipliers, results_out.load_multipliers]))
+    np.testing.assert_allclose(results_3d.load_multipliers, union[:6], rtol=1e-6)
+    assert results_3d.classify_modes('XY') == ['out-of-plane']*6
+
+    # Asking the 3D analysis for enough modes brings the in-plane modes in at their place
+    results_3d_many = model.analyze_buckling(num_modes=40)
+    in_plane_3d = results_3d_many.load_multipliers[
+        np.array(results_3d_many.classify_modes('XY')) == 'in-plane']
+    np.testing.assert_allclose(in_plane_3d[:3], results_in.load_multipliers, rtol=1e-6)
+
+    assert results_in.classify_modes() == ['in-plane']*3
+    assert results_out.classify_modes() == ['out-of-plane']*6
+    assert results_in.plane == 'XY' and not results_in.out_of_plane
+    assert results_out.plane == 'XY' and results_out.out_of_plane
+
+
+def _portal_frame_in_plane(plane, hold_base_twist=True):
+    """The portal frame of `_portal_frame` (braced eaves, top flange load) built in XY with Y up or in XZ with Z up."""
+    up, oop = ('Y', 'Z') if plane == 'XY' else ('Z', 'Y')
+
+    def point(x, v):
+        return (x, v, 0.0) if plane == 'XY' else (x, 0.0, v)
+
+    model = FEModel3D()
+    model.add_material('Steel', E_STEEL, G_STEEL, 0.3, 0.0)
+    model.add_section('IPE200', **IPE200)
+    for name, x, v in (('A', 0.0, 0.0), ('B', 0.0, 3.0), ('C', 5.0, 3.0), ('D', 5.0, 0.0)):
+        model.add_node(name, *point(x, v))
+
+    # In XZ the local y-axis of every member is horizontal and out of plane, so the Eurocode strong
+    # axis (Iy) bends in the plane without a rotation; in XY it takes rotation=90
+    rotation = 90 if plane == 'XY' else 0
+    model.add_member('Col1', 'A', 'B', 'Steel', 'IPE200', rotation=rotation)
+    model.add_member('Beam', 'B', 'C', 'Steel', 'IPE200', rotation=rotation)
+    model.add_member('Col2', 'D', 'C', 'Steel', 'IPE200', rotation=rotation)
+
+    dofs = ('DX', 'DY', 'DZ', 'RX', 'RY', 'RZ')
+    base = {'DX', 'DY', 'DZ', 'R' + oop} | ({'R' + up} if hold_base_twist else set())
+    for name in ('A', 'D'):
+        model.def_support(name, *[dof in base for dof in dofs])
+    for name in ('B', 'C'):
+        model.def_support(name, *[dof == 'D' + oop for dof in dofs])
+
+    model.add_member_dist_load('Beam', 'F' + up, -10e3, -10e3, load_height=0.1)
+    model.add_node_load('B', 'FX', 2e3)
+    return model
+
+
+def test_frame_in_xz_plane_matches_frame_in_xy_plane():
+    """
+    A frame in the XZ plane with Z up, as the structuraltools backend builds it, gives the same
+    in-plane and out-of-plane critical load factors as the same frame in XY with Y up, its
+    eigenproblems hold only the in-plane (DX, DZ, RY) and out-of-plane (DY, RX, RZ) DOFs, columns
+    are in compression, and a twist-free base on the default warping length warns about warping.
+    """
+    def run(plane, **kwargs):
+        model = _portal_frame_in_plane(plane)
+        return model, model.analyze_buckling(num_modes=3, plane=plane, **kwargs)
+
+    model_xz, in_xz = run('XZ')
+    _, in_xy = run('XY')
+    _, out_xz = run('XZ', out_of_plane=True, warping='equivalent_torsion')
+    _, out_xy = run('XY', out_of_plane=True, warping='equivalent_torsion')
+
+    np.testing.assert_allclose(in_xz.load_multipliers, in_xy.load_multipliers, rtol=1e-6)
+    np.testing.assert_allclose(out_xz.load_multipliers, out_xy.load_multipliers, rtol=1e-6)
+    assert in_xz.mode_count == out_xz.mode_count == 3
+
+    assert {dof for _, dof in in_xz.dof_map} == {'DX', 'DZ', 'RY'}
+    assert {dof for _, dof in out_xz.dof_map} == {'DY', 'RX', 'RZ'}
+    assert in_xz.mode_shapes.shape == (len(in_xz.dof_map), 3)
+
+    # Compression positive, on the analysis copy and on the caller's model
+    assert in_xz.analysis_model.members['Col1'].axial(0.0, 'Combo 1') > 0.0
+    assert model_xz.members['Col1'].axial(0.0, 'Combo 1') > 0.0
+
+    model = _portal_frame_in_plane('XZ', hold_base_twist=False)
+    with pytest.warns(UserWarning, match='warping'):
+        model.analyze_buckling(num_modes=1, plane='XZ', out_of_plane=True, warping='equivalent_torsion')
+
+
+def test_unbraced_portal_frame_governed_by_lateral_torsional_buckling():
+    """
+    An unbraced IPE200 portal frame spanning 5 m under 10 kN/m carries about 30 kNm in the beam,
+    close to the beam's closed-form critical moment of about 26 kNm (Iw = 0, fork supports). The
+    out-of-plane critical load factor must therefore be near 1.5 while the in-plane factor is in
+    the hundreds, and the axial-force-only matrix must overestimate the out-of-plane factor.
+    """
+    model = _portal_frame()
+
+    lam_in = model.analyze_buckling(num_modes=1, plane='XY').load_multipliers[0]
+    lam_out = model.analyze_buckling(num_modes=1, plane='XY', out_of_plane=True).load_multipliers[0]
+    lam_out_axial_only = model.analyze_buckling(num_modes=1, plane='XY', out_of_plane=True,
+                                                include_moments=False).load_multipliers[0]
+    lam_out_warping = model.analyze_buckling(num_modes=1, plane='XY', out_of_plane=True,
+                                             warping='equivalent_torsion').load_multipliers[0]
+    lam_out_braced = _portal_frame(brace_eaves=True).analyze_buckling(
+        num_modes=1, plane='XY', out_of_plane=True).load_multipliers[0]
+
+    assert 1.0 < lam_out < 2.5
+    assert lam_in > 50.0
+    assert lam_out_axial_only > 1.5*lam_out
+    assert lam_out < lam_out_warping < 1.2*lam_out
+    assert lam_out_braced > lam_out
+
+
+# ---------------------------------------------------------------------------
+# Results handling and argument validation
+# ---------------------------------------------------------------------------
+def test_mode_shapes_are_stored_as_load_combinations():
+    """Mode shapes land on the user's model as 'Buckling Mode n' combinations tagged 'buckling'."""
+    model = _portal_frame()
+
+    results = model.analyze_buckling(num_modes=3)
+    results = model.analyze_buckling(num_modes=3)   # A repeat must not accumulate combinations
+
+    combos = [name for name, combo in model.load_combos.items()
+              if combo.combo_tags and 'buckling' in combo.combo_tags]
+    assert combos == ['Buckling Mode 1', 'Buckling Mode 2', 'Buckling Mode 3']
+
+    # Each mode is scaled to a largest component of 1 and the user's nodes carry the displacements
+    np.testing.assert_allclose(np.max(np.abs(results.mode_shapes), axis=0), 1.0)
+    assert 'Buckling Mode 1' in model.nodes['B'].DZ
+    assert len(results.dof_map) == results.mode_shapes.shape[0] == results.free_dof_indices.size
+
+    # The analysis ran on a copy with the subdivision nodes; the user's model is not that copy
+    assert results.analysis_model is not model
+    assert len(results.analysis_model.nodes) > len(model.nodes)
+    assert results.elements_per_member == 8
+    assert results.mode_count == 3 and not results.truncated
+    assert model.solution == 'Buckling'
+
+
+def test_static_analysis_clears_buckling_mode_combinations():
+    """Like modal 'Mode n' combinations, 'Buckling Mode n' combinations are results, not loads."""
+    model = _portal_frame()
+    model.analyze_buckling(num_modes=2)
+    assert 'Buckling Mode 1' in model.load_combos
+
+    model.analyze()
+    assert not any(name.startswith('Buckling Mode') for name in model.load_combos)
+    assert model.solution != 'Buckling'
+
+
+def test_invalid_arguments_are_rejected():
+    """Bad arguments fail before any work is done."""
+    model = _uniform_moment_beam()
+
+    with pytest.raises(ValueError, match='plane'):
+        model.analyze_buckling(plane='XQ')
+
+    with pytest.raises(ValueError, match='out_of_plane'):
+        model.analyze_buckling(out_of_plane=True)
+
+    with pytest.raises(ValueError, match='warping'):
+        model.analyze_buckling(warping='exact')
+
+    with pytest.raises(ValueError, match='num_modes'):
+        model.analyze_buckling(num_modes=0)
+
+    with pytest.raises(ValueError, match='elements_per_member'):
+        model.analyze_buckling(elements_per_member=0)
+
+
+def test_member_geometric_stiffness_moment_terms():
+    """The moment part of the member geometric stiffness matrix is symmetric and has the derived entries."""
+    from Pynite.Member3D import Member3D
+
+    L = 2.0
+    kg = Member3D._kg_moments(L, Myi=1.0, Mzi=2.0, Myj=3.0, Mzj=4.0, Mxj=5.0)
+
+    np.testing.assert_allclose(kg, kg.T)
+
+    # Lateral displacement - twist coupling from the end moments
+    assert kg[2, 3] == pytest.approx(2.0/L)      # w_i - θx_i : Mzi/L
+    assert kg[2, 9] == pytest.approx(4.0/L)      # w_i - θx_j : Mzj/L
+    assert kg[1, 3] == pytest.approx(1.0/L)      # v_i - θx_i : Myi/L
+    # Twist - bending rotation coupling from the shear forces
+    assert kg[3, 4] == pytest.approx((2.0 + 4.0)/6)
+    assert kg[3, 5] == pytest.approx(-(1.0 + 3.0)/6)
+    # Torque coupling between the bending planes
+    assert kg[1, 4] == pytest.approx(5.0/L)
+    assert kg[4, 11] == pytest.approx(5.0/2)
+
+    # No moments, no terms
+    assert not np.any(Member3D._kg_moments(L, 0.0, 0.0, 0.0, 0.0, 0.0))
+
+
+# ---------------------------------------------------------------------------
 # Entry point for direct execution
 # ---------------------------------------------------------------------------
 if __name__ == '__main__':
-    test_euler_column_pinned_pinned()
-    print("Test 1 (Euler column, pinned-pinned): PASSED")
-
-    test_cantilever_effective_length()
-    print("Test 2 (Cantilever effective length): PASSED")
-
-    test_portal_frame_buckling()
-    print("Test 3 (Portal frame stability):      PASSED")
+    pytest.main([__file__, '-q'])

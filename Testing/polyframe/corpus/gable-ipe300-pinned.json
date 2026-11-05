@@ -1,0 +1,45 @@
+{
+  "case_id": "gable-ipe300-pinned",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 164.6,
+    "alpha_cr_ip_source": "text",
+    "alpha_cr_op": 7.56,
+    "alpha_cr_op_formula_ocr": 7.56,
+    "alpha_cr_op_plot_ocr": [
+      7.56,
+      7.56
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      10.62
+    ],
+    "axial_kn": {
+      "1": -6.6667,
+      "2": -6.7225,
+      "3": -8.8308,
+      "4": -13.3333
+    },
+    "governing_element_op": 4,
+    "moment_knm": {
+      "1": 0.5446,
+      "2": 15.6808,
+      "3": -19.4554,
+      "4": 19.4554
+    },
+    "uls_utilization": 0.23241020558323774,
+    "util_cross_section": 0.11,
+    "util_stability": 0.23
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "a45b6510778c1331b8d229afe589ae04ac36975bfbb684dacdb844624ed17cdf",
+    "ocr": true,
+    "report": "gable-ipe300-pinned.pdf"
+  },
+  "title": "IPE300 gable portal, 6 m span, 4 m eaves, 1 m rise, 20 kN at the apex + 5 kN wind"
+}

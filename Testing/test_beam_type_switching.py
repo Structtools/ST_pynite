@@ -10,7 +10,6 @@ Covers:
 
 import math
 import pytest
-import numpy as np
 from Pynite import FEModel3D
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,43 @@
+{
+  "case_id": "beam-ipe300-midspan-point",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": null,
+    "alpha_cr_ip_source": null,
+    "alpha_cr_op": 4.08,
+    "alpha_cr_op_formula_ocr": 4.08,
+    "alpha_cr_op_plot_ocr": [
+      4.08,
+      4.08
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      7.44
+    ],
+    "axial_kn": {
+      "1": 0.0,
+      "2": -0.0,
+      "3": 0.0
+    },
+    "governing_element_op": 1,
+    "moment_knm": {
+      "1": 30.0,
+      "2": 0.0,
+      "3": -0.0
+    },
+    "uls_utilization": 0.324376059771466,
+    "util_cross_section": 0.15,
+    "util_stability": 0.32
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "99ef8d30a0e5da71d591078aa6ca734b8684d223b6874d05c58acc4c429b5f81",
+    "ocr": true,
+    "report": "beam-ipe300-midspan-point.pdf"
+  },
+  "title": "IPE300 beam 6 m, simply supported, 20 kN at midspan"
+}

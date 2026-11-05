@@ -24,6 +24,7 @@ For a more detailed discussion on installation options and dependencies see http
 * 3D static analysis of elastic structures.
 * P-&Delta; analysis of frame type structures.
 * Modal analysis of frame type structures.
+* Linear buckling analysis of frame type structures, in-plane and out-of-plane (lateral-torsional).
 * Nonlinear pushover analysis of steel frames.
 * Member point loads, linearly varying distributed loads, and nodal loads are supported.
 * Classify loads by load case and create load combinations from load cases.
@@ -58,7 +59,12 @@ Whether you just need help getting started with Pynite, or are looking to build 
 * If you're looking for more direct guidance on using Pynite, or for help coding a project, I am available on a private consulting basis. You can reach out to me directly at Building.Code@outlook.com to discuss options.
 
 # Sponsors
-* A special thanks to @edson-gusmoes for sponsoring `Pynite`!
+Pynite is downloaded hundreds of thousands of times a month. If your company relies on Pynite in production, or if it's saved you time on a project, please consider sponsoring its continued development through [GitHub Sponsors](https://github.com/sponsors/JWock82). Sponsorships directly fund the time spent fixing bugs, reviewing pull requests, and building new features.
+
+A special thanks to our sponsors:
+* [@edson-gusmoes](https://github.com/edson-gusmoes)
+
+Want your name (or your company's) featured here? [Become a sponsor](https://github.com/sponsors/JWock82) and open a pull request adding yourself to this list!
 
 # Example Projects
 Here's a list of projects that use Pynite:
@@ -69,8 +75,17 @@ Here's a list of projects that use Pynite:
 * Phaenotyp (https://github.com/bewegende-Architektur/Phaenotyp) (https://youtu.be/shloSw9HjVI)
 
 # What's New?
-3.0.1
+3.2.0
+* Added shear wall pier top results and coupling beam right hand side results to the pier/coupling beam force results output.
+* Adjusted shear wall pier and coupling beam internal force results sign convention to match the sign convention used for members.
+* Added targeted testing for shear wall pier and coupling beam sign convention and load magnitudes.
+* Added shear wall docstrings and a readthedocs documentation page.
+* Inactive tension-only and compression-only members and springs are now modeled with zero stiffness rather than zeroed local forces. They still ride along with their end nodes, so their local displacements and deflections are always available. Any member loads on an inactive member (e.g. self weight) are now carried through to its end forces and to the support reactions.
+* Member shear, moment, axial, and torque results are now available for inactive members and are consistent between the point, max/min, and array methods. Inactive members still report a straight-line deflection between their end nodes.
+
+3.1.0
 * Improved detection of unstable structures.
+* Bug fix for shear walls. Shear walls were erroneously tracking other plates in the model for internal pier/coupling beam force summations, rather than just the plates related to the individual shear wall.
 
 3.0.0
 * Added pushover analysis! Currently, only steel sections are supported for pushover analysis. The assumed interaction equation used to estimate plastic behavior is currently calibrated toward I-shaped members.

@@ -1,0 +1,43 @@
+{
+  "case_id": "portal-ipe300-pinned-100-wind",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 17.2,
+    "alpha_cr_ip_source": "text",
+    "alpha_cr_op": 5.63,
+    "alpha_cr_op_formula_ocr": 5.63,
+    "alpha_cr_op_plot_ocr": [
+      5.63,
+      5.63
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      9.56
+    ],
+    "axial_kn": {
+      "1": -96.6667,
+      "2": -2.4983,
+      "3": -103.3333
+    },
+    "governing_element_op": 3,
+    "moment_knm": {
+      "1": 10.0067,
+      "2": 10.0067,
+      "3": 9.9933
+    },
+    "uls_utilization": 0.29498313090108763,
+    "util_cross_section": 0.13,
+    "util_stability": 0.29
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "36661f47488ed9611c30433f1a6809e575d944f4193decdf34f03c0919068f8a",
+    "ocr": true,
+    "report": "portal-ipe300-pinned-100-wind.pdf"
+  },
+  "title": "IPE300 portal 6 x 4 m, pinned bases, 100 kN on each column + 5 kN wind"
+}

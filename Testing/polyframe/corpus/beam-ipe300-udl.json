@@ -1,0 +1,43 @@
+{
+  "case_id": "beam-ipe300-udl",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": null,
+    "alpha_cr_ip_source": null,
+    "alpha_cr_op": 4.52,
+    "alpha_cr_op_formula_ocr": 4.52,
+    "alpha_cr_op_plot_ocr": [
+      4.52,
+      4.52
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      9.91
+    ],
+    "axial_kn": {
+      "1": 0.0,
+      "2": -0.0,
+      "3": 0.0
+    },
+    "governing_element_op": 1,
+    "moment_knm": {
+      "1": 22.5,
+      "2": 0.0,
+      "3": -0.0
+    },
+    "uls_utilization": 0.27809419107662015,
+    "util_cross_section": 0.11,
+    "util_stability": 0.28
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "722624333640b3ecc78f72b3c5d2dc777a87b1227e21b97d9223bace7a5345bd",
+    "ocr": true,
+    "report": "beam-ipe300-udl.pdf"
+  },
+  "title": "IPE300 beam 6 m, simply supported, 5 kN/m at the shear centre"
+}

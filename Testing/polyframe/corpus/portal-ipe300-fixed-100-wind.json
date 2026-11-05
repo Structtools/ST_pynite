@@ -1,0 +1,43 @@
+{
+  "case_id": "portal-ipe300-fixed-100-wind",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 69.2,
+    "alpha_cr_ip_source": "text",
+    "alpha_cr_op": 5.88,
+    "alpha_cr_op_formula_ocr": 5.88,
+    "alpha_cr_op_plot_ocr": [
+      5.88,
+      5.88
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      11.99
+    ],
+    "axial_kn": {
+      "1": -98.676,
+      "2": -2.4907,
+      "3": -101.324
+    },
+    "governing_element_op": 3,
+    "moment_knm": {
+      "1": -6.0543,
+      "2": 3.9827,
+      "3": -6.0014
+    },
+    "uls_utilization": 0.27033243411793767,
+    "util_cross_section": 0.1,
+    "util_stability": 0.27
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "95482b0dd72d4f1792e28237eaadbcdcf2f0e432c5baf85d3f31ca63fedbab51",
+    "ocr": true,
+    "report": "portal-ipe300-fixed-100-wind.pdf"
+  },
+  "title": "IPE300 portal 6 x 4 m, fixed bases, 100 kN on each column + 5 kN wind"
+}
