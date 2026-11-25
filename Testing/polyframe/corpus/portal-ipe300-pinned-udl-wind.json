@@ -1,0 +1,43 @@
+{
+  "case_id": "portal-ipe300-pinned-udl-wind",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 56.9,
+    "alpha_cr_ip_source": "text",
+    "alpha_cr_op": 3.99,
+    "alpha_cr_op_formula_ocr": 3.99,
+    "alpha_cr_op_plot_ocr": [
+      3.99,
+      3.99
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      6.46
+    ],
+    "axial_kn": {
+      "1": -26.6667,
+      "2": -7.662,
+      "3": -33.3333
+    },
+    "governing_element_op": 3,
+    "moment_knm": {
+      "1": -10.6479,
+      "2": -30.6479,
+      "3": 30.6479
+    },
+    "uls_utilization": 0.42159861271373755,
+    "util_cross_section": 0.19,
+    "util_stability": 0.42
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "152af23fd2166f6540d265acc83e40691b71076d99ce0ff1608dbf9dbd14cb7f",
+    "ocr": true,
+    "report": "portal-ipe300-pinned-udl-wind.pdf"
+  },
+  "title": "IPE300 portal 6 x 4 m, pinned bases, 10 kN/m on the beam + 5 kN wind"
+}

@@ -1,0 +1,41 @@
+{
+  "case_id": "column-ipe300-cantilever",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 53.4,
+    "alpha_cr_ip_source": "text",
+    "alpha_cr_op": 5.69,
+    "alpha_cr_op_formula_ocr": 5.69,
+    "alpha_cr_op_plot_ocr": [
+      5.69,
+      5.69
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      8.63
+    ],
+    "axial_kn": {
+      "1": -50.0,
+      "2": -0.0
+    },
+    "governing_element_op": 1,
+    "moment_knm": {
+      "1": -20.0,
+      "2": -0.0
+    },
+    "uls_utilization": 0.3014764214119221,
+    "util_cross_section": 0.14,
+    "util_stability": 0.3
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "a5ebdc1df590efb6085c6a60997389c6d5c561780b786ffb0d1cddfaddc6ae39",
+    "ocr": true,
+    "report": "column-ipe300-cantilever.pdf"
+  },
+  "title": "IPE300 cantilever column 4 m, fixed base, 50 kN axial + 5 kN horizontal at the head"
+}

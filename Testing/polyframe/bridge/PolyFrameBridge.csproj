@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>PolyFrameBridge</AssemblyName>
+    <RootNamespace>PolyFrameBridge</RootNamespace>
+    <!-- Decimal points, not commas: the job and result files are JSON and this
+         runs on Danish-locale machines. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The connector the application was captured with (assembly 1.1.8; the
+         application itself prints 1.1.11 on every PDF page and the corpus records
+         both). Bump this when PolyFrame is upgraded and recapture. -->
+    <PackageReference Include="PolyFrame.Connector" Version="1.1.8" />
+  </ItemGroup>
+
+</Project>

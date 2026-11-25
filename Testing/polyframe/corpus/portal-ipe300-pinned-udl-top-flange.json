@@ -1,0 +1,43 @@
+{
+  "case_id": "portal-ipe300-pinned-udl-top-flange",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": 56.9,
+    "alpha_cr_ip_source": "text",
+    "alpha_cr_op": 1.44,
+    "alpha_cr_op_formula_ocr": 1.44,
+    "alpha_cr_op_plot_ocr": [
+      1.44,
+      1.44
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      6.46
+    ],
+    "axial_kn": {
+      "1": -26.6667,
+      "2": -7.662,
+      "3": -33.3333
+    },
+    "governing_element_op": 3,
+    "moment_knm": {
+      "1": -10.6479,
+      "2": -30.6479,
+      "3": 30.6479
+    },
+    "uls_utilization": 0.9826797302853497,
+    "util_cross_section": 0.19,
+    "util_stability": 0.98
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "e341c55cc1483fc9dca265b0264f22a0b5bdd0e6500659d9a5d000b7c5fbbbc0",
+    "ocr": true,
+    "report": "portal-ipe300-pinned-udl-top-flange.pdf"
+  },
+  "title": "IPE300 portal 6 x 4 m, pinned bases, 10 kN/m on the beam's top flange + 5 kN wind"
+}

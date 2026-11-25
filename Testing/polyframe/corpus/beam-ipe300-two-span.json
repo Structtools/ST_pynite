@@ -1,0 +1,45 @@
+{
+  "case_id": "beam-ipe300-two-span",
+  "messages": [],
+  "polyframe": {
+    "alpha_cr_ip": null,
+    "alpha_cr_ip_source": null,
+    "alpha_cr_op": 16.96,
+    "alpha_cr_op_formula_ocr": 16.96,
+    "alpha_cr_op_plot_ocr": [
+      16.96,
+      16.96
+    ],
+    "alpha_cr_op_source": "ocr",
+    "alpha_ult_k": [
+      20.39
+    ],
+    "axial_kn": {
+      "1": 0.0,
+      "2": 0.0,
+      "3": -0.0,
+      "4": 0.0
+    },
+    "governing_element_op": 1,
+    "moment_knm": {
+      "1": -10.9415,
+      "2": -10.9415,
+      "3": 0.0,
+      "4": -0.0
+    },
+    "uls_utilization": 0.0918640253431649,
+    "util_cross_section": 0.05,
+    "util_stability": 0.09
+  },
+  "provenance": {
+    "application_version": "1.1.11",
+    "captured_on": "2026-10-02",
+    "connector_version": "1.1.8.0",
+    "kind": "polyframe_run",
+    "method": "GeneralMethod",
+    "model_sha256": "6736ed16a60685e78360d290b4b43936838b9d1105ea10eee92ef164b21c3785",
+    "ocr": true,
+    "report": "beam-ipe300-two-span.pdf"
+  },
+  "title": "IPE300 beam 2 x 3 m over three supports, 10 kN/m"
+}

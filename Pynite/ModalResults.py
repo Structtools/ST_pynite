@@ -12,7 +12,7 @@ caller.
 
 from __future__ import annotations  # Allows more recent type hints features
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Tuple
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -81,7 +81,7 @@ class ModalDiagnostics:
     linear_state: str | None
     shear_deformation: bool
     stabilized_dof_count: int
-    filtered_modes: List[Tuple[int, str]] = field(default_factory=list)
+    filtered_modes: list[tuple[int, str]] = field(default_factory=list)
 
     @property
     def truncated(self) -> bool:
@@ -152,12 +152,12 @@ class ModalResults:
     eigenvalues: NDArray[float64]
     mode_shapes: NDArray[float64]
     free_dof_indices: NDArray
-    dof_map: List[Tuple[str, str]]
+    dof_map: list[tuple[str, str]]
     M: object
-    total_mass: Dict[str, float]
-    participating_mass: Dict[str, float]
-    mass_per_node: Dict[str, float]
-    mesh_nodes: Dict[str, Tuple[float, float, float]]
+    total_mass: dict[str, float]
+    participating_mass: dict[str, float]
+    mass_per_node: dict[str, float]
+    mesh_nodes: dict[str, tuple[float, float, float]]
     diagnostics: ModalDiagnostics
 
     @property
@@ -266,14 +266,14 @@ class ModalResults:
 
         return self.effective_mass(direction)/participating
 
-    def mode_shape(self, mode: int) -> Dict[Tuple[str, str], float]:
+    def mode_shape(self, mode: int) -> dict[tuple[str, str], float]:
         """Returns one mode shape keyed by `(node_name, dof)`.
 
         :param mode: The 1-based mode number.
         :type mode: int
         :raises IndexError: Occurs when the mode number is outside the range that was solved for.
         :return: The mode shape, keyed by node name and degree of freedom
-        :rtype: Dict[Tuple[str, str], float]
+        :rtype: dict[tuple[str, str], float]
         """
 
         if not 1 <= mode <= self.mode_count:
@@ -295,7 +295,7 @@ class ModalResults:
 
 
 def fix_mode_shape_signs(phi: NDArray[float64],
-                         dof_coords: List[Tuple[float, float, float, int]]) -> NDArray[float64]:
+                         dof_coords: list[tuple[float, float, float, int]]) -> NDArray[float64]:
     """Applies a deterministic sign convention to a set of mode shapes, in place.
 
     An eigenvector is arbitrary in sign, so two runs of the same model -- or two models that differ
@@ -311,7 +311,7 @@ def fix_mode_shape_signs(phi: NDArray[float64],
     :param phi: Mode shapes, one column per mode. Modified in place.
     :type phi: NDArray[float64]
     :param dof_coords: The `(X, Y, Z, dof)` key of each row of `phi`, used to break ties.
-    :type dof_coords: List[Tuple[float, float, float, int]]
+    :type dof_coords: list[tuple[float, float, float, int]]
     :return: The sign-fixed mode shapes
     :rtype: NDArray[float64]
     """

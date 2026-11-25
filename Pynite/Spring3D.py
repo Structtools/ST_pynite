@@ -1,20 +1,18 @@
 # %%
 from __future__ import annotations # Allows more recent type hints features
-from numpy import zeros, array, add, subtract, matmul, insert, cross, divide
+from numpy import zeros, array, matmul, cross, divide
 from numpy.linalg import inv
 from math import isclose
-import Pynite.FixedEndReactions
 from Pynite.LoadCombo import LoadCombo
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import Dict, Optional
     from numpy import float64
     from numpy.typing import NDArray
     from Pynite.Node3D import Node3D
 
 # %%
-class Spring3D():
+class Spring3D:
     """A class representing a 3D spring element in a finite element model.
     """
 
@@ -23,24 +21,24 @@ class Spring3D():
 
 #%%
     def __init__(self, name: str, i_node: Node3D, j_node: Node3D, ks: float, 
-                 LoadCombos: Dict[str, LoadCombo] = {'Combo 1': LoadCombo('Combo 1', factors={'Case 1': 1.0})},
+                 LoadCombos: dict[str, LoadCombo] = {'Combo 1': LoadCombo('Combo 1', factors={'Case 1': 1.0})},
                  tension_only: bool = False, comp_only: bool = False) -> None:
         '''
         Initializes a new spring.
         '''
         self.name: str = name      # A unique name for the spring given by the user
-        self.ID: Optional[int] = None        # Unique index number for the spring assigned by the program
+        self.ID: int | None = None        # Unique index number for the spring assigned by the program
         self.i_node: Node3D = i_node  # The spring's i-node
         self.j_node: Node3D = j_node  # The spring's j-node
         self.ks: float = ks          # The spring constant (force/displacement)
-        self.load_combos: Dict[str, LoadCombo] = LoadCombos # The dictionary of load combinations in the model this spring belongs to
+        self.load_combos: dict[str, LoadCombo] = LoadCombos # The dictionary of load combinations in the model this spring belongs to
         self.tension_only: bool = tension_only # Indicates whether the spring is tension-only
         self.comp_only: bool = comp_only # Indicates whether the spring is compression-only
 
         # Springs need to track whether they are active or not for any given load combination.
         # They may become inactive for a load combination during a tension/compression-only
         # analysis. This dictionary will be used when the model is solved.
-        self.active: Dict[str, bool] = {} # Key = load combo name, Value = True or False
+        self.active: dict[str, bool] = {} # Key = load combo name, Value = True or False
 
 #%%
     def __repr__(self) -> str:
@@ -56,10 +54,19 @@ class Spring3D():
         return self.i_node.distance(self.j_node)
 
 #%%
-    def ke(self) -> NDArray[float64]:
+    def ke(self, combo_name: str | None = None) -> NDArray[float64]:
         '''
         Returns the local elastic stiffness matrix for the spring.
+
+        Parameters
+        ----------
+        combo_name : string, optional
+            If given and the spring is inactive for this load combination, a zero matrix is returned. If `None` the spring's stiffness is returned regardless of its active state.
         '''
+
+        # An inactive spring has no stiffness for this combo
+        if combo_name is not None and not self.active.get(combo_name, True):
+            return zeros((12, 12))
 
         # Get the spring constant
         ks = self.ks
@@ -92,9 +99,9 @@ class Spring3D():
         combo_name : string
             The name of the load combination to calculate the local end force vector for (not the load combination itself).
         '''
-        
-        # Calculate and return the spring's local end force vector
-        return matmul(self.ke(), self.d(combo_name))
+
+        # Calculate and return the spring's local end force vector (zero stiffness when inactive)
+        return matmul(self.ke(combo_name), self.d(combo_name))
 
 #%%
     def d(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
@@ -220,18 +227,15 @@ class Spring3D():
         # Initialize the displacement vector
         D = zeros((12, 1))
         
-        # Read in the global displacements from the nodes
-        # Apply axial displacements only if the spring is active
-        if self.active[combo_name] == True:
-            D[0, 0] = self.i_node.DX[combo_name]
-            D[6, 0] = self.j_node.DX[combo_name]
-
-        # Apply the remaining displacements
+        # Read all global displacements from the end nodes, whether or not the
+        # spring is active. Activity controls force contribution, not kinematics.
+        D[0, 0] = self.i_node.DX[combo_name]
         D[1, 0] = self.i_node.DY[combo_name]
         D[2, 0] = self.i_node.DZ[combo_name]
         D[3, 0] = self.i_node.RX[combo_name]
         D[4, 0] = self.i_node.RY[combo_name]
         D[5, 0] = self.i_node.RZ[combo_name]
+        D[6, 0] = self.j_node.DX[combo_name]
         D[7, 0] = self.j_node.DY[combo_name]
         D[8, 0] = self.j_node.DZ[combo_name]
         D[9, 0] = self.j_node.RX[combo_name]
