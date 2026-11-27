@@ -1988,6 +1988,16 @@ class FEModel3D:
                     member_Kg = member.Kg(P, elastic_condensation=include_moments,
                                           combo_name=combo_name if include_moments else None, **moments)
 
+                    if sparse == True:
+                        # Every term of the member's matrix, zeros included, in the row-by-row
+                        # order the term-by-term loop below appends them in, so that the COO
+                        # matrix sums them in the same order
+                        dofs = self._build_dof_vector(member.i_node, member.j_node)
+                        row.append(np.repeat(dofs, 12))
+                        col.append(np.tile(dofs, 12))
+                        data.append(np.asarray(member_Kg).reshape(-1))
+                        continue
+
                     # Step through each term in the member's stiffness matrix
                     # 'a' & 'b' below are row/column indices in the member's stiffness matrix
                     # 'm' & 'n' are corresponding row/column indices in the global stiffness matrix
@@ -2020,10 +2030,10 @@ class FEModel3D:
                                 Kg[m, n] += member_Kg[(a, b)]
 
         if sparse:
-            # Convert the row, col, data lists to numpy arrays and create the COO matrix
-            row = np.array(row)
-            col = np.array(col)
-            data = np.array(data)
+            # Join the members' row, col and data arrays and create the COO matrix
+            row = np.concatenate(row) if row else np.array(row)
+            col = np.concatenate(col) if col else np.array(col)
+            data = np.concatenate(data) if data else np.array(data)
             Kg = sp.sparse.coo_matrix((data, (row, col)), shape=(len(self.nodes)*6, len(self.nodes)*6))
 
         # Return the global geometric stiffness matrix
