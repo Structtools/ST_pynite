@@ -2,7 +2,7 @@ from __future__ import annotations  # Allows more recent type hints features
 from typing import TYPE_CHECKING, Literal
 from math import isclose
 
-from numpy import array, zeros, add, subtract, matmul, insert, dot, cross, divide, count_nonzero, concatenate, outer
+from numpy import array, zeros, add, subtract, matmul, insert, dot, divide, count_nonzero, concatenate, outer
 from numpy import linspace, vstack, hstack, allclose, radians, sin, cos, maximum, minimum
 from numpy.linalg import inv, pinv, norm, solve
 
@@ -22,6 +22,18 @@ if TYPE_CHECKING:
     from Pynite.Material import Material
     from Pynite.Section import Section
     from Pynite.LoadCombo import LoadCombo
+
+
+def _cross(a, b) -> NDArray[float64]:
+    """Returns the cross product of two 3-vectors, at least one of them of floats, as `numpy.cross`
+    computes it: each component one difference of two products, in double precision, so the
+    result is the same to the last bit.
+    It skips the array handling that makes `numpy.cross` slow on a single pair of vectors.
+    """
+
+    a0, a1, a2 = (float(component) for component in a)
+    b0, b1, b2 = (float(component) for component in b)
+    return array([a1*b2 - a2*b1, a2*b0 - a0*b2, a0*b1 - a1*b0])
 
 
 class Member3D:
@@ -112,6 +124,8 @@ class Member3D:
 
         # The transformation matrix depends only on the end node coordinates and the member rotation, so 'T' caches it here, keyed on those values.
         self._T_cache: tuple[tuple[float, ...], NDArray[float64]] | None = None
+        # Its inverse, cached with the matrix it inverts
+        self._T_inv_cache: tuple[NDArray[float64], NDArray[float64]] | None = None
 
         # Members need a link to the model they belong to
         self.model: FEModel3D = model
@@ -175,6 +189,11 @@ class Member3D:
         # An inactive member (e.g. a slack tension-only member) has no stiffness for this combo
         if combo_name is not None and not self.active.get(combo_name, True):
             return zeros((12, 12))
+
+        # Without end releases there is nothing to condense: the condensation term below is an
+        # exact zero, so the result is the uncondensed matrix, value for value
+        if not self._partition_D()[1]:
+            return self._ke_unc()
 
         # Partition the local stiffness matrix as 4 submatrices in
         # preparation for static condensation
@@ -325,6 +344,13 @@ class Member3D:
         # Add the load height terms of the member loads if a load combination was given
         if combo_name is not None:
             kg = add(kg, self._kg_load_height(combo_name))
+
+        # Without end releases there is nothing to condense: the condensation terms below are
+        # exact zeros, so the result is the uncondensed matrix, value for value
+        if not self._partition_D()[1]:
+            if not elastic_condensation and isclose(P, 0.0):
+                return zeros((12, 12))
+            return kg
 
         # Partition the geometric stiffness matrix as 4 submatrices in
         # preparation for static condensation
@@ -1204,6 +1230,11 @@ class Member3D:
         # Get the lists of unreleased and released degree of freedom indices
         R1_indices, R2_indices = self._partition_D()
 
+        # Without end releases there is nothing to condense: the condensation term below is an
+        # exact zero, so the result is the uncondensed vector, value for value
+        if not R2_indices:
+            return self._fer_unc(combo_name)
+
         # Partition the local stiffness matrix and local fixed end reaction vector
         k11, k12, k21, k22 = self._partition(self._ke_unc())
         fer1, fer2 = self._partition(self._fer_unc(combo_name))
@@ -1424,6 +1455,19 @@ class Member3D:
             self._T_cache = (key, transMatrix)
         return self._T_cache[1]
 
+    def _T_inv(self) -> NDArray[float64]:
+        """
+        Returns the inverse of the transformation matrix, computed once per matrix `T()` returns.
+        It is read-only, as `T()` is.
+        """
+
+        T = self.T()
+        if self._T_inv_cache is None or self._T_inv_cache[0] is not T:
+            T_inv = inv(T)
+            T_inv.setflags(write=False)
+            self._T_inv_cache = (T, T_inv)
+        return self._T_inv_cache[1]
+
     def _build_T(self) -> NDArray[float64]:
         """
         Builds the transformation matrix from the end node coordinates and the member rotation.
@@ -1465,7 +1509,7 @@ class Member3D:
             # of the local x-axis and the local y-axis. This vector will be perpendicular to
             # both the local x-axis and the local y-axis.
             y = [0, 1, 0]
-            z = cross(x, y)
+            z = _cross(x, y)
 
             # Divide the z-vector by its magnitude to produce a unit vector of direction cosines
             z = divide(z, (z[0]**2 + z[1]**2 + z[2]**2)**0.5)
@@ -1483,15 +1527,15 @@ class Member3D:
             # in which the vectors are 'crossed' has been selected to ensure the y-axis always
             # has an upward component (i.e. the top of the beam is always on top).
             if Yj > Yi:
-                z = cross(proj, x)
+                z = _cross(proj, x)
             else:
-                z = cross(x, proj)
+                z = _cross(x, proj)
 
             # Divide the z-vector by its magnitude to produce a unit vector of direction cosines
             z = divide(z, (z[0]**2 + z[1]**2 + z[2]**2)**0.5)
 
             # Find the direction cosines for the local y-axis
-            y = cross(z, x)
+            y = _cross(z, x)
             y = divide(y, (y[0]**2 + y[1]**2 + y[2]**2)**0.5)
 
         # Check if the member is rotated
@@ -1509,12 +1553,12 @@ class Member3D:
 
             # Rotate y using the Rodrigues formula
             v = array(y)
-            y = v * c + cross(u, v) * s + u * (dot(u, v)) * (1 - c)
+            y = v * c + _cross(u, v) * s + u * (dot(u, v)) * (1 - c)
             y /= norm(y)
 
             # Rotate z using the Rodrigues formula
             v = array(z)
-            z = v * c + cross(u, v) * s + u * (dot(u, v)) * (1 - c)
+            z = v * c + _cross(u, v) * s + u * (dot(u, v)) * (1 - c)
             z /= norm(z)
 
         # Create the direction cosines matrix
@@ -1537,7 +1581,7 @@ class Member3D:
         """
 
         # Calculate and return the stiffness matrix in global coordinates
-        return matmul(matmul(inv(self.T()), self.ke()), self.T())
+        return matmul(matmul(self._T_inv(), self.ke()), self.T())
 
     def Kg(self, P: float = 0.0, Myi: float = 0.0, Mzi: float = 0.0, Myj: float = 0.0,
            Mzj: float = 0.0, Mxj: float = 0.0, elastic_condensation: bool = False,
@@ -1568,7 +1612,7 @@ class Member3D:
 
         # Calculate and return the geometric stiffness matrix in global coordinates
         kg = self.kg(P, Myi, Mzi, Myj, Mzj, Mxj, elastic_condensation, combo_name)
-        return matmul(matmul(inv(self.T()), kg), self.T())
+        return matmul(matmul(self._T_inv(), kg), self.T())
 
     def Km(self, combo_name: str) -> NDArray[float64]:
         """Returns the global plastic reduction matrix for the member. Used to modify member behavior for plastic hinges at the ends.
@@ -1580,7 +1624,7 @@ class Member3D:
         """
 
         # Calculate and return the plastic reduction matrix in global coordinates
-        return matmul(matmul(inv(self.T()), self.km(combo_name)), self.T())
+        return matmul(matmul(self._T_inv(), self.km(combo_name)), self.T())
 
     def F(self, combo_name: str='Combo 1') -> NDArray[float64]:
         """
@@ -1588,7 +1632,7 @@ class Member3D:
         """
 
         # Calculate and return the global force vector
-        return matmul(inv(self.T()), self.f(combo_name))
+        return matmul(self._T_inv(), self.f(combo_name))
 
     def FER(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """
@@ -1601,7 +1645,7 @@ class Member3D:
         """
 
         # Calculate and return the fixed end reaction vector
-        return matmul(inv(self.T()), self.fer(combo_name))
+        return matmul(self._T_inv(), self.fer(combo_name))
 
     def D(self, combo_name: str = 'Combo 1') -> NDArray[float64]:
         """

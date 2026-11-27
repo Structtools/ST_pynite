@@ -690,11 +690,18 @@ def _check_stability(model: FEModel3D, K: NDArray[float64]) -> None:
     # Initialize the `unstable` flag to `False`
     unstable = False
 
+    # Look the nodes up by their internal ID (the first node holding an ID, as a search of
+    # `model.nodes` finds it), and read the diagonal once rather than term by term
+    nodes_by_ID = {}
+    for node in model.nodes.values():
+        nodes_by_ID.setdefault(node.ID, node)
+    diagonal = K.diagonal()
+
     # Step through each diagonal term in the stiffness matrix
     for i in range(K.shape[0]):
 
         # Determine which node this term belongs to
-        node = [node for node in model.nodes.values() if node.ID == int(i/6)][0]
+        node = nodes_by_ID[int(i/6)]
 
         # Determine which degree of freedom this term belongs to
         dof = i % 6
@@ -714,7 +721,7 @@ def _check_stability(model: FEModel3D, K: NDArray[float64]) -> None:
             supported = node.support_RZ
 
         # Check if the degree of freedom on this diagonal is unstable
-        if isclose(K[i, i], 0) and not supported:
+        if isclose(diagonal[i], 0) and not supported:
 
             # Flag the model as unstable
             unstable = True
@@ -1473,19 +1480,33 @@ def _unpartition(model: FEModel3D, V1: NDArray[float64], V2: NDArray[float64], V
 
     V = zeros((len(model.nodes)*6, 1))
 
+    # The position of each dof in the two lists (its first, as `list.index` finds it), so that a
+    # lookup does not search the lists
+    V1_positions = {}
+    for position, dof in enumerate(V1_indices):
+        V1_positions.setdefault(dof, position)
+    V2_positions = {}
+    for position, dof in enumerate(V2_indices):
+        V2_positions.setdefault(dof, position)
+
     # Step through each node in the model
     for node in model.nodes.values():
 
         # Step through each degree of freedom at the node
         for i in range(6):
 
+            dof = node.ID*6 + i
+
             # Check if the dof is in the list of known vector terms
-            if node.ID*6 + i in V2_indices:
+            if dof in V2_positions:
                 # Get the vector term for the bounded dof
-                V[(node.ID*6 + i, 0)] = V2[V2_indices.index(node.ID*6 + i), 0]
-            else:
+                V[(dof, 0)] = V2[V2_positions[dof], 0]
+            elif dof in V1_positions:
                 # Get the vector term for the unbounded dof
-                V[(node.ID*6 + i, 0)] = V1[V1_indices.index(node.ID*6 + i), 0]
+                V[(dof, 0)] = V1[V1_positions[dof], 0]
+            else:
+                # A dof in neither list raises the ValueError it always has
+                V1_indices.index(dof)
 
     # Return the vector
     return V
